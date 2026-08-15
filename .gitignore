@@ -1,0 +1,17 @@
+﻿node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+wear/app/build/
+wear/.gradle/
+wear/build/
+wear/local.properties
