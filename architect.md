@@ -1,377 +1,335 @@
-# Aibou — Architecture Document
+# architecture.md — Aibou
 
-## System Overview
+> Prerequisites: `context.md`, then `specs.md`.
+> **Nothing in this document is a suggestion.** Where a version, path, name, or code is specified, use exactly that. Where you must deviate, record it in `context.md` §10 with a rationale.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Developer's Machine                          │
-│                                                                 │
-│  ┌──────────┐     ┌──────────────┐     ┌───────────────────┐   │
-│  │ AI Agent │────▶│ Aibou Daemon │────▶│ Policy Engine     │   │
-│  │(Kiro,etc)│◀────│              │     │                   │   │
-│  └──────────┘     └──────┬───────┘     │ • Rule matching   │   │
-│                          │             │ • Learning model  │   │
-│                          │             │ • Action history  │   │
-│                          │             └───────────────────┘   │
-└──────────────────────────┼──────────────────────────────────────┘
-                           │ WebSocket (E2E encrypted)
-                           ▼
-              ┌────────────────────────┐
-              │     Relay Service      │
-              │                        │
-              │ • Device registry      │
-              │ • Message routing      │
-              │ • Push dispatch        │
-              │ • Session management   │
-              └───────────┬────────────┘
-                          │ Push Notifications
-                ┌─────────┴─────────┐
-                ▼                   ▼
-        ┌──────────────┐   ┌──────────────┐
-        │  Phone App   │   │  Watch App   │
-        │              │   │              │
-        │ • Full view  │   │ • Glance     │
-        │ • Rules UI   │   │ • Tap to act │
-        │ • History    │   │ • Haptics    │
-        └──────────────┘   └──────────────┘
-```
+---
 
-## Component Architecture
-
-### 1. Aibou Daemon
-
-The daemon is the core local component. It runs as a background process on the developer's machine.
-
-**Responsibilities:**
-- Intercept approval gates from AI agents
-- Evaluate actions against the policy engine
-- Communicate with the relay service
-- Cache decisions locally for offline resilience
-- Provide a local HTTP API for extensions/integrations
-
-**Architecture:**
+## 1. System shape
 
 ```
-┌─────────────────────────────────────────────┐
-│                Aibou Daemon                  │
-│                                             │
-│  ┌─────────────────┐  ┌─────────────────┐  │
-│  │ Agent Adapters   │  │ Policy Engine   │  │
-│  │                  │  │                 │  │
-│  │ • VSCode IPC     │  │ • Rule store    │  │
-│  │ • CLI stdout     │  │ • Evaluator     │  │
-│  │ • MCP protocol   │  │ • Learner       │  │
-│  │ • File watcher   │  │ • Suggestions   │  │
-│  └────────┬─────────┘  └────────┬────────┘  │
-│           │                      │           │
-│  ┌────────▼──────────────────────▼────────┐  │
-│  │           Core Orchestrator            │  │
-│  │                                        │  │
-│  │  • Gate detection                      │  │
-│  │  • Decision routing                    │  │
-│  │  • Response delivery                   │  │
-│  │  • Timeout handling                    │  │
-│  └────────────────────┬───────────────────┘  │
-│                       │                      │
-│  ┌────────────────────▼───────────────────┐  │
-│  │         Transport Layer                │  │
-│  │                                        │  │
-│  │  • WebSocket client                    │  │
-│  │  • E2E encryption                     │  │
-│  │  • Reconnection logic                 │  │
-│  │  • Local HTTP API (port 7749)         │  │
-│  └────────────────────────────────────────┘  │
-└─────────────────────────────────────────────┘
+┌──────────────────────── Developer's machine ─────────────────────────┐
+│                                                                       │
+│   kiro-cli (ACP agent)          Aibou Bridge (Node)                   │
+│   ┌──────────────────┐          ┌─────────────────────────────────┐   │
+│   │  agent harness   │◄────────►│ AcpClient   (JSON-RPC / stdio)  │   │
+│   │  tools, sessions │  stdio   │ SessionMgr  (state, ring buffer)│   │
+│   └──────────────────┘          │ PolicyEngine(allow/deny/escalate)│  │
+│           │                     │ ApprovalMgr (held ACP requests) │   │
+│   ┌───────▼──────────┐   HTTP   │ HttpApi     (pair, audit, static)│  │
+│   │ CLI hooks (opt.) ├─────────►│ WsHub       (AWP fan-out)       │   │
+│   └──────────────────┘  POST    └────────────┬────────────────────┘   │
+│                                              │ 127.0.0.1:8787         │
+└──────────────────────────────────────────────┼────────────────────────┘
+                                               │ WebSocket (AWP) + HTTP
+                          ┌────────────────────┴────────────────────┐
+                          │                                         │
+                   ┌──────▼───────┐                        ┌────────▼────────┐
+                   │  PWA (React) │                        │ Wear OS (Kotlin)│
+                   │  full surface│                        │  glanceable     │
+                   └──────────────┘                        └─────────────────┘
 ```
 
-**Agent Adapter Interface:**
+**Key property:** the Bridge is the ACP *client*. It owns the session, therefore it owns the permission flow. Observation-only designs (hook tailing, TUI scraping) cannot approve anything. This is decision D1 and it is not negotiable.
 
-```rust
-trait AgentAdapter {
-    /// Start listening for approval gates from this agent
-    fn start(&mut self, sender: Sender<Gate>) -> Result<()>;
-    
-    /// Deliver an approval/denial decision back to the agent
-    fn respond(&self, gate_id: &str, decision: Decision) -> Result<()>;
-    
-    /// Check if this adapter can handle the given agent
-    fn can_handle(&self, agent_info: &AgentInfo) -> bool;
-}
+CLI hooks are a **secondary enrichment channel only** (R1.3, A8). Nothing P0 may depend on them.
 
-struct Gate {
-    id: String,
-    agent: String,
-    action: Action,
-    context: ActionContext,
-    timestamp: Instant,
-}
+---
 
-enum Action {
-    RunCommand { command: String, cwd: PathBuf },
-    WriteFile { path: PathBuf, summary: String },
-    DeleteFile { path: PathBuf },
-    ReadFile { path: PathBuf },
-    NetworkRequest { url: String, method: String },
-    Custom { kind: String, description: String },
-}
-
-enum Decision {
-    Approve,
-    Deny,
-    ApproveAlways,  // Auto-approve this pattern going forward
-    Timeout,        // No response within configured window
-}
-```
-
-### 2. Policy Engine
-
-The policy engine determines whether an action should be auto-approved, auto-denied, or escalated to the user.
-
-**Rule Evaluation Order:**
-1. Hard denies (blocklist) — always deny, never learn away
-2. Hard approves (allowlist) — always approve silently
-3. Learned rules — patterns from user behavior
-4. Default policy — escalate to user
-
-**Rule Format:**
-
-```yaml
-# ~/.aibou/policies/default.yaml
-version: 1
-project: "*"
-
-rules:
-  # Always allow reading any file in the project
-  - action: read_file
-    path: "${PROJECT}/**"
-    decision: approve
-
-  # Always allow running test commands
-  - action: run_command
-    pattern: "npm test*|cargo test*|pytest*"
-    decision: approve
-
-  # Never allow touching SSH keys
-  - action: "*"
-    path: "~/.ssh/**"
-    decision: deny
-
-  # Never allow rm -rf outside project
-  - action: run_command
-    pattern: "rm -rf*"
-    path_not: "${PROJECT}/**"
-    decision: deny
-
-  # Everything else: ask me
-  - action: "*"
-    decision: escalate
-```
-
-**Learning Model:**
+## 2. Repository layout
 
 ```
-┌──────────────────────────────────────────┐
-│           Adaptive Learning              │
-│                                          │
-│  Input: (action_type, path_pattern,      │
-│          command_pattern, user_decision)  │
-│                                          │
-│  Logic:                                  │
-│  1. Group by (action_type + pattern)     │
-│  2. If approved >= N times consecutively │
-│     → suggest auto-approve rule          │
-│  3. If denied >= N times consecutively   │
-│     → suggest auto-deny rule             │
-│  4. Never auto-promote without consent   │
-│                                          │
-│  Output: Rule suggestions shown in app   │
-└──────────────────────────────────────────┘
+aibou/
+├── .kiro/
+│   ├── specs/aibou/{requirements.md,design.md,tasks.md}
+│   ├── steering/{conventions.md,testing.md,security.md}
+│   └── hooks/on-save-verify.json
+├── packages/
+│   ├── protocol/          # AWP types + zod schemas. Zero runtime deps beyond zod.
+│   ├── bridge/            # the daemon
+│   ├── pwa/               # React client
+│   └── mock-agent/        # fake ACP agent for tests + demo mode
+├── wear/                  # standalone Gradle project (not in pnpm workspace)
+├── docs/
+├── scripts/
+├── Makefile
+├── pnpm-workspace.yaml
+└── README.md
 ```
 
-### 3. Relay Service
+`packages/protocol` is the single source of truth for wire types. Bridge and PWA import it. The Wear app mirrors it in Kotlin data classes — **when you change `protocol`, you must update the Kotlin mirror in the same commit.**
 
-The relay service is a lightweight cloud component that routes messages between daemons and mobile devices.
+---
 
-**Design Principles:**
-- Stateless message routing (no persistent storage of approval content)
-- E2E encrypted payloads (relay cannot read action details)
-- Metadata-only storage (timestamps, device IDs, delivery status)
-- Horizontally scalable
+## 3. Stack — pinned
 
-**Architecture:**
-
-```
-┌───────────────────────────────────────────────┐
-│              Relay Service                     │
-│                                               │
-│  ┌─────────────┐  ┌────────────────────────┐  │
-│  │ WebSocket   │  │ Push Notification      │  │
-│  │ Gateway     │  │ Dispatcher             │  │
-│  │             │  │                        │  │
-│  │ • Auth      │  │ • APNs (iOS/Watch)     │  │
-│  │ • Routing   │  │ • FCM (Android/Wear)   │  │
-│  │ • Heartbeat │  │ • Fallback (WebPush)   │  │
-│  └──────┬──────┘  └───────────┬────────────┘  │
-│         │                     │               │
-│  ┌──────▼─────────────────────▼────────────┐  │
-│  │         Session Manager                 │  │
-│  │                                         │  │
-│  │  • Device registry                      │  │
-│  │  • Daemon <-> Device mapping            │  │
-│  │  • Pending gate queue                   │  │
-│  │  • Delivery confirmation                │  │
-│  └─────────────────────────────────────────┘  │
-└───────────────────────────────────────────────┘
-```
-
-**API Endpoints:**
-
-| Endpoint | Method | Description |
+| Layer | Choice | Notes |
 |---|---|---|
-| `/ws/daemon` | WS | Daemon connection (sends gates, receives decisions) |
-| `/ws/device` | WS | Mobile app connection (receives gates, sends decisions) |
-| `/api/register` | POST | Register a new device |
-| `/api/pair` | POST | Pair a device with a daemon |
-| `/api/sessions` | GET | List active agent sessions |
-| `/api/history` | GET | Recent approval history |
+| Runtime | Node.js ≥ 20.11 | `engines` field enforced; `.nvmrc` committed. |
+| Package manager | pnpm 9 workspaces | Lockfile committed. |
+| Language | TypeScript 5.x, `"strict": true` | No `any` outside a documented ACP-boundary adapter. |
+| Validation | `zod` | Every inbound frame parsed, never cast. |
+| HTTP/WS | `fastify` + `@fastify/websocket` | Also serves the built PWA statically. |
+| Bridge tests | `vitest` | |
+| PWA | React 18 + Vite 5 + TypeScript + Tailwind | |
+| PWA state | TanStack Query for HTTP, plain reducer for the WS stream | No Redux. |
+| Wear | Kotlin, Compose for Wear OS, minSdk 30, targetSdk 34 | Wear OS 4/5, Galaxy Watch 4+. |
+| Wear networking | OkHttp `WebSocket` + `kotlinx.serialization` | |
+| Wear storage | `EncryptedSharedPreferences` | |
+| Wear STT | `RecognizerIntent.ACTION_RECOGNIZE_SPEECH` | On-device, no cloud key. |
 
-### 4. Mobile & Watch Apps
+**Do not add a database.** Config and policy are JSON files under `~/.aibou/`; events are in memory (D5).
 
-**Phone App Layers:**
+---
+
+## 4. Bridge modules
 
 ```
-┌─────────────────────────────────┐
-│         Presentation            │
-│  • Notification UI              │
-│  • Session dashboard            │
-│  • Rule management              │
-│  • Pairing flow                 │
-├─────────────────────────────────┤
-│         Domain Logic            │
-│  • Decision handling            │
-│  • Rule CRUD                    │
-│  • Session state                │
-├─────────────────────────────────┤
-│         Data / Network          │
-│  • WebSocket client             │
-│  • Push notification handler    │
-│  • Local storage (rules cache)  │
-│  • E2E crypto                   │
-└─────────────────────────────────┘
+packages/bridge/src/
+├── index.ts            # arg parsing, wiring, graceful shutdown
+├── acp/
+│   ├── client.ts       # JSON-RPC 2.0 framing over stdio
+│   ├── methods.ts      # thin typed wrappers; ONLY file that names ACP methods
+│   └── normalize.ts    # ACP frames -> AWP events. The adapter boundary.
+├── session/
+│   ├── manager.ts      # registry, lifecycle, status derivation
+│   └── ringbuffer.ts   # 500-event per-session buffer, monotonic seq
+├── policy/
+│   ├── engine.ts       # allow | deny | escalate
+│   ├── rules.ts        # rule types + matching
+│   └── defaults.json   # shipped default policy
+├── approval/
+│   └── manager.ts      # held ACP requests, timeout, idempotent resolution
+├── server/
+│   ├── http.ts         # /api/pair, /api/health, /api/audit, static PWA
+│   ├── ws.ts           # AWP hub: auth, subscribe, fan-out, heartbeat
+│   └── auth.ts         # pairing codes, tokens, constant-time compare
+└── util/{log.ts,paths.ts,errors.ts}
 ```
 
-**Watch App Constraints:**
-- Max 2 lines of text for action summary
-- Binary action: Approve (green) / Deny (red)
-- Haptic pattern distinguishes risk level (gentle = routine, strong = dangerous)
-- "Open on Phone" for anything that needs more context
-- Complication shows: pending gate count
+**Isolation rule:** `acp/methods.ts` and `acp/normalize.ts` are the *only* files permitted to know ACP's shape. When the verify step (context §8) discovers a real method name differs from the assumption, exactly two files change.
 
-### 5. Security Architecture
+---
 
-**Threat Model:**
+## 5. AWP — the Aibou Wire Protocol
 
-| Threat | Mitigation |
+JSON over a single WebSocket at `/ws`. Every frame:
+
+```ts
+type Frame = { v: 1; t: string; id?: string; ts: number; /* ...payload */ };
+```
+
+`id` is a client-generated correlation id, echoed on the reply.
+
+### 5.1 Client → Server
+
+| `t` | Payload | Notes |
+|---|---|---|
+| `auth` | `{ token: string }` | Must be first frame. R3.2.5 |
+| `subscribe` | `{ sessionId?: string; since?: number }` | Omit `sessionId` for all sessions. |
+| `session.create` | `{ cwd: string }` | |
+| `session.list` | `{}` | |
+| `prompt.send` | `{ sessionId: string; text: string; source: "text" \| "voice" }` | |
+| `permission.respond` | `{ approvalId: string; decision: "allow" \| "deny"; remember?: boolean }` | |
+| `session.interrupt` | `{ sessionId: string }` | |
+| `policy.get` / `policy.set` | `{}` / `{ policy: Policy }` | P1 |
+| `pong` | `{}` | |
+
+### 5.2 Server → Client
+
+| `t` | Payload |
 |---|---|
-| Man-in-the-middle on relay | E2E encryption (Noise Protocol XX handshake) |
-| Stolen phone approves malicious action | Biometric required for high-risk actions |
-| Compromised relay service | Zero-knowledge design, encrypted payloads |
-| Replay attacks | Nonce + timestamp on every gate message |
-| Rogue daemon impersonation | Device-to-daemon pairing with shared secret |
+| `hello` | `{ bridgeVersion, protocolVersion: 1, mode: "live" \| "mock", capabilities: string[] }` |
+| `ack` | `{ id, ok: true, result?: unknown }` |
+| `error` | `{ id?, code: AibouErrorCode, message: string, retryable: boolean }` |
+| `session.state` | `{ sessionId, cwd, status, statusSource: "observed" \| "inferred", statusReason?, pendingApprovals: number, lastActivity }` |
+| `event` | `{ sessionId, seq, kind, payload }` |
+| `permission.request` | `{ approvalId, sessionId, toolName, summary, toolInput, riskTier: "low" \| "medium" \| "high", expiresAt }` |
+| `permission.resolved` | `{ approvalId, decision: "allow" \| "deny", resolution: "user" \| "policy" \| "timeout", resolvedBy?, ruleId? }` |
+| `heartbeat` | `{}` |
 
-**Encryption Flow:**
+### 5.3 Event kinds
 
-```
-Daemon                          Relay                     Phone
-  |                               |                        |
-  |---- Encrypted Gate ---------->|---- Push + Payload --->|
-  |     (only phone can decrypt)  |    (relay can't read)  |
-  |                               |                        |
-  |<--- Encrypted Decision ------|<--- Decision ----------|
-  |     (only daemon can decrypt) |    (relay can't read)  |
-```
+`agent.text` · `agent.thought` · `tool.start` · `tool.end` · `task.update` · `usage` · `session.error` · `unknown`
 
-**Key Exchange:**
-- Pairing establishes a shared symmetric key via QR code (out-of-band)
-- Session keys derived per connection using HKDF
-- Key rotation every 24 hours or 1000 messages (whichever first)
+`unknown` is mandatory (AC1.3.5). ACP frames we do not recognise are preserved verbatim rather than dropped or crashed on.
 
-### 6. Data Flow — Happy Path
+### 5.4 Error codes
 
 ```
-1. Agent hits a permission gate (e.g., wants to run `npm run build`)
-2. Agent adapter detects the gate, creates a Gate struct
-3. Policy engine evaluates:
-   - Is `npm run build` in the allowlist? -> Auto-approve, skip to step 8
-   - Is it in the blocklist? -> Auto-deny, skip to step 8
-   - Neither -> Escalate
-4. Daemon encrypts gate summary, sends to relay via WebSocket
-5. Relay dispatches push notification to registered devices
-6. Watch buzzes, shows: "Run: npm run build" with checkmark/X buttons
-7. User taps checkmark (approve)
-8. Decision flows back: Phone -> Relay -> Daemon -> Agent adapter
-9. Agent resumes execution
+AIBOU_UNAUTHORIZED · AIBOU_BAD_CWD · AIBOU_SESSION_LIMIT · AIBOU_SESSION_NOT_FOUND
+AIBOU_ALREADY_RESOLVED · AIBOU_APPROVAL_NOT_FOUND · AIBOU_UNSUPPORTED
+AIBOU_AGENT_DOWN · AIBOU_RATE_LIMITED · AIBOU_BAD_FRAME · AIBOU_INTERNAL
 ```
 
-**Timeout Handling:**
-- Default timeout: 5 minutes (configurable)
-- On timeout: apply default policy (deny for high-risk, approve for low-risk)
-- Notify user that timeout occurred
+Exit codes: `78` agent unavailable · `98` port in use · `1` unhandled.
 
-### 7. Scalability Considerations
+### 5.5 The `summary` field
 
-| Dimension | Design Choice |
+`permission.request.summary` is what the watch renders. Rules:
+- ≤ 80 characters, single line, no ANSI.
+- Shell commands: first 80 chars of the command, ellipsised.
+- File writes: `write <basename>` plus `(outside cwd)` when applicable.
+- Never truncate mid-escape-sequence.
+- The full `toolInput` always accompanies it for the PWA.
+
+---
+
+## 6. Permission flow — the critical path
+
+```
+agent                 Bridge                       clients
+  │  request_permission  │                            │
+  ├─────────────────────►│                            │
+  │                      │ PolicyEngine.evaluate()    │
+  │                      │                            │
+  │        ┌─────────────┴──────────────┐             │
+  │        │ allow / deny               │             │
+  │        │  → answer immediately      │             │
+  │        │  → emit permission.resolved (resolvedBy:"policy")
+  │        └─────────────┬──────────────┘             │
+  │                      │ escalate                   │
+  │                      │ hold ACP response          │
+  │                      │ store PendingApproval      │
+  │                      ├─── permission.request ────►│  buzz
+  │                      │                            │
+  │                      │◄── permission.respond ─────┤  tap
+  │◄─── answer ──────────┤                            │
+  │                      ├─── permission.resolved ───►│  all clients dismiss
+```
+
+**Invariants — enforce with tests:**
+1. Exactly one ACP answer per request, ever. Second responder gets `AIBOU_ALREADY_RESOLVED`.
+2. A held request always terminates: user response, or timeout → deny. Never leaks.
+3. Client disconnection never resolves an approval. Pending state survives and is replayed on resubscribe.
+4. `deny` beats `allow` on rule conflict, always.
+5. Unmatched → `escalate`. Fail closed.
+6. Every resolution emits `permission.resolved`, including policy auto-resolutions, so the audit trail has no holes.
+
+---
+
+## 7. Policy model
+
+```ts
+type Rule = {
+  id: string;
+  when: {
+    tool?: string | string[];          // exact or glob, e.g. "fs_*"
+    pathIn?: "cwd" | "outside_cwd" | string;
+    pathMatches?: string;              // glob
+    commandMatches?: string;           // regex source, anchored by engine
+  };
+  then: "allow" | "deny" | "escalate";
+  reason: string;                      // shown in UI and audit log
+};
+
+type Policy = { version: 1; rules: Rule[] };
+```
+
+Evaluation: collect **all** matching rules → any `deny` wins → else any `escalate` wins → else `allow` → else (nothing matched) `escalate`.
+
+Shipped defaults, in `policy/defaults.json`:
+- `allow` read-only tools (`fs_read` and equivalents, per verified tool names).
+- `allow` writes where `pathIn: "cwd"`.
+- `escalate` writes where `pathIn: "outside_cwd"`.
+- `escalate` any command matching the dangerous list: `rm -rf`, `sudo`, `curl|wget` piped to a shell, `git push --force`, `chmod 777`, `dd`, `mkfs`, `> /dev/`, package publish commands.
+- `escalate` any path matching the secret list: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.aws/*`, `.ssh/*`, `*credentials*`.
+- `deny` anything writing to `~/.aibou/` — no self-modification.
+
+Lists are data (AC2.2.8) and carry a test table of ≥ 20 positives and ≥ 10 negatives.
+
+---
+
+## 8. Status derivation
+
+| Status | Source | Rule |
+|---|---|---|
+| `awaiting_permission` | observed | ≥ 1 pending approval. |
+| `working` | observed | Prompt sent, no turn-end signal received. |
+| `idle` | observed | Turn-end signal received. |
+| `awaiting_input` | **inferred** | Turn ended with a trailing interrogative and no tool call in the final segment. |
+| `error` | observed | ACP error frame or agent stderr. |
+| `disconnected` | observed | Child process exited. |
+
+Any status with `statusSource: "inferred"` must render with an `inferred` marker in both clients and be documented in `docs/status-inference.md` with its failure modes (AC1.4.3, AC1.4.4). This is a rules-compliance requirement, not polish — see `context.md` §6.
+
+---
+
+## 9. Mock agent
+
+`packages/mock-agent` is a standalone executable implementing the verified ACP subset. It is selected by `AIBOU_KIRO_BIN=node packages/mock-agent/dist/index.js` or `--mock`.
+
+It must be **scriptable**: a JSON scenario file drives a timed sequence of events, so tests and the demo can deterministically reproduce, among others, `scenarios/happy-path.json`, `scenarios/permission-escalation.json`, `scenarios/agent-crash.json`, `scenarios/slow-agent.json`.
+
+When mock mode is active the Bridge sets `hello.mode = "mock"` and every client displays the mock banner (`context.md` §6.4). **The banner is not optional and must not be suppressible.**
+
+---
+
+## 10. Wear OS
+
+```
+wear/app/src/main/java/dev/aibou/wear/
+├── MainActivity.kt
+├── data/{AibouClient.kt,TokenStore.kt,Models.kt}
+└── ui/{PairScreen.kt,StatusScreen.kt,ApprovalScreen.kt,VoiceScreen.kt,theme/}
+```
+
+- Standalone (D4). `android:usesCleartextTraffic` permitted **only** for the `10.0.2.2` and RFC1918 dev path, gated behind a debug network-security-config. Document this.
+- `AibouClient` holds the OkHttp WebSocket, auto-reconnects with the backoff in AC3.3.2, and exposes a `StateFlow<UiState>`.
+- Approval screen: `summary` at ≥ 16 sp, Approve and Deny as full-width `Chip`s ≥ 48 dp tall, separated vertically to prevent mis-taps. Vibrate on arrival via `Vibrator`.
+- Interrupt requires a confirm swipe (AC5.1.6).
+- Emulator: the Bridge on the host is `10.0.2.2:8787` from inside the emulator. **This one line belongs in the README quickstart** — it is the most likely judge-facing failure.
+
+---
+
+## 11. Failure handling matrix
+
+| Failure | Behaviour |
 |---|---|
-| Concurrent daemons | Relay uses connection-per-daemon, horizontally scaled |
-| Message throughput | Most messages are tiny (< 1KB), WebSocket is efficient |
-| Global latency | Deploy relay in multiple regions, route to nearest |
-| Storage | Minimal — only metadata and device registry persisted |
-| Watch battery | Batch non-urgent notifications, use silent push for low-risk |
+| `kiro-cli` not found | Exit 78, print resolved path + `AIBOU_KIRO_BIN` hint. |
+| Agent crashes mid-session | Sessions → `disconnected`, broadcast, 3 respawns (1/2/4 s), then exit. |
+| Unparseable ACP frame | Emit `event.kind: "unknown"`, log, continue. Never crash. |
+| Malformed `policy.json` | Log, fall back to paranoid, do not exit. |
+| Client disconnects mid-approval | Approval persists; replayed on resubscribe. |
+| Two clients answer same approval | First wins; second gets `AIBOU_ALREADY_RESOLVED`. |
+| Port in use | Exit 98 naming the port. |
+| Watch loses Wi-Fi | Auto-reconnect, resubscribe with last `seq`, replay missed events. |
+| Approval timeout | Deny, `resolution: "timeout"`, audit entry. |
 
-### 8. Deployment Architecture
+---
 
+## 12. Performance budget
+
+| Path | Budget |
+|---|---|
+| ACP permission request → `permission.request` on the wire | < 250 ms |
+| Watch tap → ACP answer sent | < 300 ms |
+| ACP `session/update` → client render | < 500 ms |
+| Bridge idle memory | < 150 MB |
+| Wear cold start → status visible | < 2 s |
+
+---
+
+## 13. Build and run
+
+```bash
+make setup     # pnpm install; build protocol
+make dev       # bridge (watch) + pwa (vite) concurrently
+make demo      # bridge --mock + built PWA on :8787  ← the judge path
+make test      # vitest, all packages
+make check     # lint + typecheck + test
+make wear      # assembleRelease -> wear/app/build/outputs/apk/release/
 ```
-┌─────────────────────────────────────────────┐
-│              Production                      │
-│                                             │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐    │
-│  │ Relay   │  │ Relay   │  │ Relay   │    │
-│  │ (US-E)  │  │ (EU-W)  │  │ (APAC)  │    │
-│  └────┬────┘  └────┬────┘  └────┬────┘    │
-│       │             │             │         │
-│  ┌────▼─────────────▼─────────────▼────┐   │
-│  │         Redis Pub/Sub               │   │
-│  │    (cross-region message routing)   │   │
-│  └─────────────────────────────────────┘   │
-│                                             │
-│  ┌─────────────────────────────────────┐   │
-│  │         PostgreSQL                  │   │
-│  │    (device registry, audit log)     │   │
-│  └─────────────────────────────────────┘   │
-└─────────────────────────────────────────────┘
-```
 
-### 9. Integration Points
+`make demo` must work from a clean clone with no Kiro credentials (AC6.2.2).
 
-**VS Code Extension Integration:**
-- Listen on VS Code's terminal output for approval prompts
-- Hook into extension APIs where available (Kiro hooks, Copilot events)
-- Inject responses back via simulated user input or API calls
+---
 
-**CLI Agent Integration:**
-- Wrap agent CLI in a PTY proxy
-- Parse stdout for approval patterns
-- Inject stdin responses
+## 14. Conventions
 
-**MCP Integration:**
-- Implement as an MCP server that agents route approvals through
-- Cleanest integration path for MCP-aware agents
-- Standard tool interface: `request_approval(action, context) -> decision`
-
-### 10. Future Architecture Extensions
-
-- **Team relay:** Shared policies, delegated approvals, escalation chains
-- **Agent marketplace:** Community-contributed adapter plugins
-- **Analytics dashboard:** Team-wide metrics on agent usage and approval patterns
-- **Webhook integrations:** Slack/Teams notifications as fallback channel
-- **Voice approval:** "Hey Siri, approve" via Shortcuts integration
+- Conventional Commits.
+- No `any` outside `acp/normalize.ts`, and there it must carry a comment naming the ACP shape being adapted.
+- Every inbound frame is `zod`-parsed. Never `as`.
+- Errors are typed `AibouError` with a code from §5.4. No bare `throw new Error("...")` on a user-reachable path.
+- Structured JSON logging; never log tokens, and never log `toolInput` at info level.
+- One export per file for components; colocate tests as `*.test.ts`.
