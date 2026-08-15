@@ -1,0 +1,35 @@
+{
+  "name": "@aibou/bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Aibou Bridge — ACP host daemon",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "aibou": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "demo": "tsx src/index.ts --mock",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "echo ok"
+  },
+  "dependencies": {
+    "@aibou/protocol": "workspace:*",
+    "fastify": "^4.28.1",
+    "@fastify/websocket": "^10.0.1",
+    "@fastify/static": "^7.0.4",
+    "zod": "^3.23.8",
+    "qrcode-terminal": "^0.12.0",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.2",
+    "vitest": "^2.0.5",
+    "@types/node": "^20.14.10"
+  }
+}

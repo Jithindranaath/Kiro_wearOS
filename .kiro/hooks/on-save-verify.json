@@ -1,0 +1,13 @@
+{
+  "name": "Typecheck on Save",
+  "version": "1.0.0",
+  "description": "Runs TypeScript typecheck when source files are saved",
+  "when": {
+    "type": "fileEdited",
+    "patterns": ["*.ts", "*.tsx"]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "pnpm run typecheck"
+  }
+}

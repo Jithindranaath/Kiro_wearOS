@@ -1,0 +1,21 @@
+{
+  "name": "aibou",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remote control for locally running Kiro agent sessions",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --filter @aibou/bridge dev",
+    "demo": "pnpm --filter @aibou/bridge demo",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run test"
+  },
+  "keywords": ["kiro", "acp", "agent", "remote", "approval", "wear-os"],
+  "license": "MIT"
+}
