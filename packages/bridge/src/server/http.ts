@@ -8,7 +8,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AuthManager } from './auth.js';
 import { WsHub } from './ws.js';
 
@@ -72,7 +73,16 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Fast
 
   // ─── Static PWA serving ────────────────────────────────────────────────────
 
-  const resolvedPwaPath = pwaPath ?? join(import.meta.dirname ?? __dirname, '../../pwa/dist');
+  let resolvedPwaPath: string;
+  if (pwaPath) {
+    resolvedPwaPath = pwaPath;
+  } else {
+    // Resolve relative to this file's location
+    const thisFile = fileURLToPath(import.meta.url);
+    const thisDir = join(thisFile, '..');
+    resolvedPwaPath = resolve(thisDir, '../../../pwa/dist');
+  }
+
   if (existsSync(resolvedPwaPath)) {
     await app.register(fastifyStatic, {
       root: resolvedPwaPath,

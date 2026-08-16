@@ -57,8 +57,21 @@ kiro-cli (ACP) ←stdin/stdout→ Aibou Bridge (Node) ←WebSocket→ Phone PWA 
 - **Auth**: 6-digit pairing code (10min TTL), CSPRNG tokens (32 bytes), constant-time comparison, rate limiting (5 attempts/60s → 5min block)
 - **Tests**: 54 passing (ring buffer + policy engine with 20+ positive and 10+ negative dangerous command cases)
 
-### 🔲 Phase 2: PWA Client (Next)
-### 🔲 Phase 3: Wear OS App
+### ✅ Phase 2: PWA Client (Complete)
+
+- **Pairing Screen**: 6-digit code entry, bridge URL configuration, token persisted in localStorage
+- **WebSocket Client**: Auto-connect, auth frame, subscribe with replay-since, exponential backoff reconnect (1s→30s cap)
+- **Session List**: Status indicators, cwd basename, pending-approval badge, inferred status marker
+- **Event Stream**: Live events with auto-scroll only when at bottom, kind-based icons/colors
+- **Approval Cards**: Full tool input display, shell command syntax highlighting, risk tier badges, Approve/Deny buttons
+- **Prompt Input**: Text area with Enter-to-send, interrupt (Stop) button shown when agent is working
+- **Mock Banner**: Persistent amber bar when Bridge is in mock mode (unsuppressible per rules)
+- **Connection Status**: Visual indicator with reconnecting state
+- **Browser Notifications**: Permission request raises Notification when tab has focus
+- **PWA Installable**: Web manifest + service worker, passes Chrome installability check
+- **Served from Bridge**: Single origin, no CORS needed — `pnpm run demo` serves everything on :8787
+
+### 🔲 Phase 3: Wear OS App (Next)
 ### 🔲 Phase 4: Polish & Submit
 
 ## Features
