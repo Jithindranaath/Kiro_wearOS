@@ -16,6 +16,16 @@
     "lint": "pnpm -r lint",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run test"
   },
-  "keywords": ["kiro", "acp", "agent", "remote", "approval", "wear-os"],
-  "license": "MIT"
+  "keywords": [
+    "kiro",
+    "acp",
+    "agent",
+    "remote",
+    "approval",
+    "wear-os"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "ws": "^8.21.3"
+  }
 }

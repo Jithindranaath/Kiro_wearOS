@@ -15,7 +15,7 @@ import { ExitCode } from '@aibou/protocol';
 import { AcpClient } from './acp/client.js';
 import { AcpMethods, type PermissionRequestParams, type SessionUpdateParams } from './acp/methods.js';
 import { normalizeSessionUpdate } from './acp/normalize.js';
-import { SessionManager } from './session/manager.js';
+import { SessionManager, type SessionInfo } from './session/manager.js';
 import { PolicyEngine } from './policy/engine.js';
 import { ApprovalManager } from './approval/manager.js';
 import { AuthManager } from './server/auth.js';
@@ -34,6 +34,25 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   const { mock, host, port, paranoid, trace } = options;
 
   // ─── Resolve kiro-cli binary ─────────────────────────────────────────────
+
+  /**
+   * Format a SessionInfo into a session.state frame.
+   * Maps `id` to `sessionId` per the AWP protocol.
+   */
+  function makeSessionStateFrame(info: SessionInfo) {
+    return {
+      v: 1 as const,
+      t: 'session.state' as const,
+      sessionId: info.id,
+      cwd: info.cwd,
+      status: info.status,
+      statusSource: info.statusSource,
+      statusReason: info.statusReason,
+      pendingApprovals: info.pendingApprovals,
+      lastActivity: info.lastActivity,
+      ts: Date.now(),
+    };
+  }
 
   const kiroBin = process.env.AIBOU_KIRO_BIN ?? 'kiro-cli';
   const acpArgs = ['acp'];
@@ -138,12 +157,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       // Broadcast updated session state
       const info = sessionManager.getSession(sessionId);
       if (info) {
-        wsHub.broadcast(sessionId, {
-          v: 1,
-          t: 'session.state',
-          ...info,
-          ts: Date.now(),
-        });
+        wsHub.broadcast(sessionId, makeSessionStateFrame(info));
       }
     }
   });
@@ -226,12 +240,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     // Broadcast updated session state
     const info = sessionManager.getSession(sessionId);
     if (info) {
-      wsHub.broadcast(sessionId, {
-        v: 1,
-        t: 'session.state',
-        ...info,
-        ts: Date.now(),
-      });
+      wsHub.broadcast(sessionId, makeSessionStateFrame(info));
     }
   }
 
@@ -251,12 +260,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     // Broadcast updated session state
     const info = sessionManager.getSession(sessionId);
     if (info) {
-      wsHub.broadcast(sessionId, {
-        v: 1,
-        t: 'session.state',
-        ...info,
-        ts: Date.now(),
-      });
+      wsHub.broadcast(sessionId, makeSessionStateFrame(info));
     }
   });
 
@@ -299,12 +303,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       // Send current session state
       const info = sessionManager.getSession(sid);
       if (info) {
-        wsHub.sendToClient(client, {
-          v: 1,
-          t: 'session.state',
-          ...info,
-          ts: Date.now(),
-        });
+        wsHub.sendToClient(client, makeSessionStateFrame(info));
       }
     }
 
@@ -370,6 +369,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       const result = await methods.sessionNew(cwd);
       const info = sessionManager.createSession(result.sessionId, cwd);
       wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, result: info, ts: Date.now() });
+      // Broadcast session state to all clients
+      wsHub.broadcast(info.id, makeSessionStateFrame(info));
     } catch (err) {
       wsHub.sendToClient(client, {
         v: 1, t: 'error', id: frame.id, code: 'AIBOU_INTERNAL',
@@ -450,12 +451,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   function broadcastAllSessionStates(): void {
     for (const info of sessionManager.listSessions()) {
-      wsHub.broadcast(info.id, {
-        v: 1,
-        t: 'session.state',
-        ...info,
-        ts: Date.now(),
-      });
+      wsHub.broadcast(info.id, makeSessionStateFrame(info));
     }
   }
 
