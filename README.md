@@ -4,9 +4,11 @@
 
 When your AI coding agent stalls waiting for permission, Aibou sends the approval request to your phone or watch. One tap, and the agent continues. You never went back to your desk.
 
+---
+
 ## How this differs from Kiro for iOS
 
-Kiro for iOS (launched June 2025) supervises sessions running in AWS cloud sandboxes. It cannot reach a Kiro session running on your own machine.
+Kiro for iOS (launched June 2025 at the AWS New York Summit) supervises sessions running in **AWS cloud sandboxes**. It cannot reach a Kiro session running on your own machine.
 
 **Aibou supervises the session running on _your_ machine** — the one with your local files, your local toolchain, and your uncommitted work.
 
@@ -16,139 +18,240 @@ Kiro for iOS (launched June 2025) supervises sessions running in AWS cloud sandb
 | Requires | Cloud sandbox | Local `kiro-cli` |
 | Approval mechanism | In-app | Phone PWA + Wear OS watch |
 | Policy engine | No | Yes — configurable rules |
+| Scope | Cloud sessions only | Local sessions only |
 
-## Quick Start (≤ 5 minutes)
+We did not invent mobile agent supervision. Kiro for iOS does it for cloud sessions. We extended it to the local session, which the official product does not cover (see [Kiro issue #9460](https://github.com/kirodotdev/Kiro/issues)).
+
+---
+
+## Quick Start (≤ 5 minutes, ≤ 4 commands)
 
 ```bash
 git clone <repo-url> && cd aibou
 pnpm install
-pnpm run demo        # starts Bridge in mock mode on :8787
+pnpm --filter @aibou/protocol build
+pnpm run demo
 ```
 
-Open `http://localhost:8787` on your phone (same LAN). Done.
+Open `http://localhost:8787` on your phone browser (same Wi-Fi). Enter the 6-digit code shown in the terminal. Done.
 
-**For Wear OS emulator:** The Bridge is at `10.0.2.2:8787` from inside the emulator.
+**For real Kiro sessions** (not mock mode):
+```bash
+pnpm --filter @aibou/pwa build
+pnpm --filter @aibou/bridge start
+```
+
+**For Wear OS emulator:** The Bridge is at `10.0.2.2:8787` from inside the emulator. This is the Android emulator's host loopback — it is the most common setup failure for judges.
+
+---
 
 ## Architecture
 
 ```
-kiro-cli (ACP) ←stdin/stdout→ Aibou Bridge (Node) ←WebSocket→ Phone PWA / Wear OS Watch
-                                └── Policy Engine (allow/deny/escalate)
-                                └── Approval Manager (holds ACP responses)
-                                └── Session Manager (ring buffer, status)
+kiro-cli acp ←JSON-RPC/stdio→ Aibou Bridge ←WebSocket/AWP→ Phone PWA / Wear OS
+                                 ├── Policy Engine (allow/deny/escalate)
+                                 ├── Approval Manager (holds ACP responses)
+                                 ├── Session Manager (ring buffer, status)
+                                 └── Auth (pairing code, bearer tokens)
 ```
 
-- **Bridge**: Spawns `kiro-cli acp` as subprocess, owns the permission flow via JSON-RPC 2.0
-- **Policy Engine**: Evaluates tool calls against configurable rules. Fail-closed: unmatched = escalate.
-- **Approval Manager**: Holds ACP `session/request_permission` responses until phone/watch user taps approve/deny.
-- **PWA**: Full client — sessions, events, approvals, prompting
-- **Wear OS**: Glanceable — approve/deny in under 3 seconds
+See [docs/architecture.md](docs/architecture.md) for the full system diagram and module map.
 
-## Current State
-
-### ✅ Phase 1: Bridge Core (Complete)
-
-- **ACP Client**: JSON-RPC 2.0 over stdin/stdout, request/response correlation, incoming request handling
-- **Session Manager**: Create/list sessions, status derivation (observed + inferred), 500-event ring buffer with replay-since
-- **Policy Engine**: Rule evaluation (deny > escalate > allow), default rules for reads/writes/shell/secrets, paranoid mode, fail-closed
-- **Approval Manager**: Hold ACP permission requests, timeout → deny, idempotent resolution, summary generation
-- **HTTP Server**: Fastify with `/api/pair` (6-digit code → token), `/api/health`, static PWA serving
-- **WebSocket Hub**: Auth gate (5s timeout), subscribe with event replay, heartbeat (20s), fan-out to all clients
-- **Auth**: 6-digit pairing code (10min TTL), CSPRNG tokens (32 bytes), constant-time comparison, rate limiting (5 attempts/60s → 5min block)
-- **Tests**: 54 passing (ring buffer + policy engine with 20+ positive and 10+ negative dangerous command cases)
-
-### ✅ Phase 2: PWA Client (Complete)
-
-- **Pairing Screen**: 6-digit code entry, bridge URL configuration, token persisted in localStorage
-- **WebSocket Client**: Auto-connect, auth frame, subscribe with replay-since, exponential backoff reconnect (1s→30s cap)
-- **Session List**: Status indicators, cwd basename, pending-approval badge, inferred status marker
-- **Event Stream**: Live events with auto-scroll only when at bottom, kind-based icons/colors
-- **Approval Cards**: Full tool input display, shell command syntax highlighting, risk tier badges, Approve/Deny buttons
-- **Prompt Input**: Text area with Enter-to-send, interrupt (Stop) button shown when agent is working
-- **Mock Banner**: Persistent amber bar when Bridge is in mock mode (unsuppressible per rules)
-- **Connection Status**: Visual indicator with reconnecting state
-- **Browser Notifications**: Permission request raises Notification when tab has focus
-- **PWA Installable**: Web manifest + service worker, passes Chrome installability check
-- **Served from Bridge**: Single origin, no CORS needed — `pnpm run demo` serves everything on :8787
-
-### ✅ Phase 3: Wear OS App (Complete)
-
-- **Standalone app** — connects directly to Bridge over Wi-Fi, no phone companion (D4)
-- **PairScreen**: 6-digit number pad keypad, stores token in EncryptedSharedPreferences
-- **StatusScreen**: Session name (cwd basename), live status with color, elapsed time, pending approval badge, mock mode badge, inferred status marker
-- **ApprovalScreen**: Summary at ≥16sp, full-width Approve/Deny chips ≥48dp tall, vibrate + wake screen on arrival, auto-dismiss when resolved by another client
-- **VoiceScreen (P1)**: RecognizerIntent speech capture, transcript confirmation before sending, hidden if unavailable
-- **AibouClient**: OkHttp WebSocket, auth + subscribe, StateFlow<UiState>, exponential backoff reconnect (1s→30s)
-- **Haptics**: Risk-tier-based vibration patterns (gentle=low, medium=default, strong=high)
-- **Network security**: Cleartext allowed only for 10.0.2.2 (emulator) and RFC1918 (LAN dev)
-- **Navigation**: SwipeDismissableNavHost — pair → status → approval, swipe to interrupt
-
-### 🔲 Phase 4: Polish & Submit (Next)
+---
 
 ## Features
 
-| Feature | Status | Source |
+| Feature | Status | Data Source |
 |---|---|---|
-| Permission interception | ✅ | Observed (ACP `session/request_permission`) |
-| Policy auto-approve/deny | ✅ | Rules engine with defaults |
-| Session status | ✅ | Observed + Inferred (see docs/status-inference.md) |
-| Event stream with replay | ✅ | Ring buffer, monotonic seq, no gaps |
-| Pairing & auth | ✅ | 6-digit code, bearer tokens, rate limiting |
-| Mock mode | ✅ | For testing without Kiro credentials |
-| Watch approval | ✅ | Wear OS standalone (Compose for Wear) |
-| Token/credit usage | ❌ | Not exposed by ACP (honest absence, not faked) |
+| Permission interception & approval | ✅ | Observed — ACP `session/request_permission` |
+| Policy auto-approve/deny/escalate | ✅ | Rules engine with shipped defaults |
+| Session status derivation | ✅ | Observed + Inferred (see below) |
+| Live event stream with replay | ✅ | Observed — ACP `session/update` notifications |
+| Task list | ✅ | Observed — ACP `plan` update |
+| Token/context usage | ✅ | Observed — ACP `usage_update`, forwarded verbatim |
+| Pairing & auth | ✅ | 6-digit code, 32-byte CSPRNG tokens |
+| Watch approval (vibrate + wake) | ✅ | Wear OS standalone, ≥48dp touch targets |
+| Voice prompt from watch | ✅ | RecognizerIntent with transcript confirmation |
+| Browser notifications (PWA) | ✅ | Notification API on permission escalation |
+| PWA installable | ✅ | Web manifest + service worker |
+| Mock mode for demos/CI | ✅ | Full stack works without Kiro credentials |
+| Credits / billing consumption | ❌ | Not exposed by ACP — absent, not faked |
 
-## Mock Mode
+Usage figures are shown **only** when the agent sends them. If no `usage_update`
+arrives, the clients render `—` rather than a plausible-looking number.
 
-`pnpm run demo` starts the Bridge with `--mock`, using a fake ACP agent. This lets judges run the full stack without Kiro credentials.
+### Observed vs. Inferred Status
 
-When mock mode is active:
-- Bridge logs a banner on startup
-- WebSocket `hello` carries `mode: "mock"`
-- PWA shows a persistent amber bar: **MOCK MODE — not a real Kiro session**
-- Watch app shows a mock badge
+| Status | Source | Note |
+|---|---|---|
+| awaiting_permission | Observed | ≥1 held ACP permission request |
+| working | Observed | Prompt sent, no turn_end received |
+| idle | Observed | turn_end received |
+| awaiting_input | **Inferred** | Turn ended with `?`, no tool call in segment |
+| error | Observed | ACP error frame |
+| disconnected | Observed | Agent process exited |
+
+Inferred statuses render with an `inferred` marker in both the PWA and Watch app. See [docs/status-inference.md](docs/status-inference.md) for heuristic details and known failure modes.
+
+---
 
 ## Policy Engine
 
-Rules live in `~/.aibou/policy.json`. Default behavior:
-- **Auto-allow**: read-only tools, writes inside project directory
-- **Escalate**: writes outside project, dangerous shell commands, secret file access
-- **Deny**: writes to `~/.aibou/` (no self-modification)
-- **Fail closed**: unmatched rules always escalate to human
-- **Deny wins**: if both allow and deny rules match, deny takes precedence
+Rules live in `~/.aibou/policy.json`. Shipped defaults:
 
-Use `--paranoid` to escalate everything regardless of rules.
+| Action | Decision |
+|---|---|
+| Writes to `~/.aibou/` (self-modification) | `deny` |
+| Secret file access (`.env`, `*.pem`, `.ssh/`, `.aws/`, …) | `escalate` |
+| Dangerous shell commands (`rm -rf`, `sudo`, `git push --force`, …) | `escalate` |
+| File writes outside the project directory | `escalate` |
+| Read-only tools | `allow` |
+| File writes inside the project directory | `allow` |
+| Anything unmatched | `escalate` (**fail closed**) |
+
+**Deny always wins** — if both an allow and a deny rule match, deny takes
+precedence regardless of order.
+
+`--paranoid` escalates everything. A malformed `policy.json` also falls back to
+paranoid mode rather than failing open, and the Bridge says so on startup.
+
+Rules match on the agent's real tool name (`_meta.kiro.toolName`, e.g. `shell`),
+falling back to the ACP tool kind (e.g. `execute`).
+
+**One honest caveat:** the policy engine can only govern what the agent actually
+asks about. `kiro-cli` requests permission for shell commands but self-approves
+file reads, so reads never reach the engine. That is a property of the agent, not
+a gap in the rules.
+
+---
+
+## Mock Mode
+
+`pnpm run demo` starts the Bridge with `--mock`, using a fake ACP agent that replays a deterministic scenario (text → tool call → permission request). This lets anyone run the full stack without Kiro credentials.
+
+When mock mode is active:
+- Bridge prints `🟡 MOCK MODE` banner on startup
+- WebSocket `hello` frame carries `mode: "mock"`
+- PWA renders a persistent amber bar: **⚠️ MOCK MODE — not a real Kiro session**
+- Watch app shows a mock badge on the status screen
+- The mock banner is **not suppressible** — this is a competition rules compliance requirement
+
+---
 
 ## Built with Kiro
 
 Aibou was specced and built in Kiro, using Kiro's own hooks and ACP surfaces, to build a tool that observes Kiro.
 
 The `.kiro/` directory contains:
-- `specs/` — Requirements, design, and tasks that drove the build
-- `steering/` — Project conventions enforced during development
-- `hooks/` — Typecheck-on-save hook used during development
+- **`specs/`** — Requirements, design, and tasks that drove the build
+- **`steering/`** — Project conventions enforced during development (code style, testing, security)
+- **`hooks/`** — Typecheck-on-save hook used during development
+
+---
 
 ## Project Structure
 
 ```
 aibou/
-├── .kiro/              # Kiro specs, steering, hooks (committed)
+├── .kiro/                  # Kiro specs, steering, hooks (committed, real)
 ├── packages/
-│   ├── protocol/       # AWP types + zod schemas
-│   ├── bridge/         # ACP host daemon (Phase 1 ✅)
-│   ├── pwa/            # React PWA client (Phase 2)
-│   └── mock-agent/     # Fake ACP agent for tests
-├── wear/               # Wear OS app (Phase 3)
-└── docs/               # Architecture, protocol, findings
+│   ├── protocol/           # AWP types + zod schemas (shared source of truth)
+│   ├── bridge/             # Node.js daemon — ACP host, WS server, policy
+│   ├── pwa/                # React PWA — full mobile client
+│   └── mock-agent/         # Fake ACP agent for tests and demo
+├── wear/                   # Wear OS app — Kotlin, Compose, standalone
+├── docs/                   # Architecture, protocol, ACP findings
+├── scripts/                # Integration test
+├── SECURITY.md             # Threat model and security posture
+├── CONTRIBUTING.md         # Dev setup and commands
+└── Makefile                # Build shortcuts
 ```
+
+---
+
+## Testing
+
+```bash
+# Type check every package
+pnpm -r typecheck
+
+# Unit tests — 151 tests across policy engine, ring buffer,
+# ACP normaliser and tool-call correlation
+pnpm --filter @aibou/bridge test
+```
+
+Integration suites run against a live Bridge. Start it, note the 6-digit code,
+then in a second terminal:
+
+```bash
+pnpm run demo                          # terminal 1
+
+node scripts/module-test.mjs <code>    # 67 assertions: every module + integration
+node scripts/pwa-flow-test.mjs <code>  # 20 assertions: exact PWA frame sequence
+```
+
+To drive a **real** Kiro session and watch the frames:
+
+```bash
+pnpm run build
+node packages/bridge/dist/index.js --trace
+node scripts/live-probe.mjs <code> "Run the shell command 'node --version'."
+```
+
+Raw ACP frames are written to `~/.aibou/logs/acp-<date>.jsonl`.
+
+Current status: **4/4 packages typecheck, 151/151 unit tests, 67/67 module
+assertions, 20/20 PWA-flow assertions** — all verified against both the mock
+agent and real `kiro-cli` 2.18.1.
+
+---
 
 ## Known Limitations
 
-- No TLS — designed for trusted LAN or VPN (document Tailscale as user option)
-- No background push notifications — PWA alerts require the tab to be open
-- Single session only in v1
-- Token/credit usage not displayed (not exposed by ACP, not faked)
-- Watch app requires Wi-Fi (no Bluetooth relay through phone)
+- **No TLS.** Binds to `127.0.0.1` by default; LAN binding requires an explicit
+  `--host` flag and prints a warning. Use Tailscale or a VPN for remote access.
+- **No background push.** PWA notifications require the tab to be open, and the
+  watch app must be running. There is no server-initiated push.
+- **Reads bypass the policy engine.** `kiro-cli` self-approves file reads and
+  never sends a permission request for them.
+- **Credits / billing not shown.** Not exposed by ACP, and not faked.
+- **Wear OS needs Wi-Fi.** Standalone by design — no Bluetooth relay through a
+  phone, so the watch must be on the same network as the Bridge.
+- **`awaiting_input` is a heuristic.** It can produce false positives on
+  rhetorical questions. Always labelled `inferred`; see
+  [docs/status-inference.md](docs/status-inference.md).
+- **Single-session flow.** The Bridge supports 4 concurrent sessions and the PWA
+  lists them, but the UI is tuned for one at a time.
+- **`session/new` is slow.** ~3.4 s against the real agent. Expected, not a hang.
+
+## Documentation Corrections
+
+While building this, two documented ACP behaviours turned out not to match the
+shipped agent. Both are load-bearing, and both were found by tracing real frames:
+
+1. **`session/prompt` takes `prompt`, not `content`.** Kiro's docs page shows
+   `content`; the real agent requires `prompt` per the ACP v1 spec. Sending
+   `content` makes the agent exit silently with code 0 — no error, no response.
+2. **`session/cancel` is a notification, not a request.** Awaiting a reply hangs
+   forever; confirmation arrives as the `session/prompt` response with
+   `stopReason: "cancelled"`.
+
+Full details, raw frames and measured latencies:
+[docs/acp-findings.md](docs/acp-findings.md).
+
+---
+
+## Kiro Usage Section
+
+This project demonstrates Kiro's spec-driven development workflow:
+
+1. **Specs** — Requirements and design documents in `.kiro/specs/aibou/` defined the scope before implementation began
+2. **Steering** — Convention files in `.kiro/steering/` enforced code style, testing standards, and security practices throughout development
+3. **Hooks** — A typecheck-on-save hook in `.kiro/hooks/` ran continuous validation during development
+
+The reflexive angle: *Aibou was specced and built in Kiro, using Kiro's own hooks and ACP surfaces, to build a tool that observes Kiro.*
+
+---
 
 ## License
 

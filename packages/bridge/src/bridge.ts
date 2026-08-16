@@ -7,14 +7,17 @@
  * relays decisions from connected clients (phone/watch) back to the agent.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { ExitCode } from '@aibou/protocol';
 import { AcpClient } from './acp/client.js';
 import { AcpMethods, type PermissionRequestParams, type SessionUpdateParams } from './acp/methods.js';
 import { normalizeSessionUpdate } from './acp/normalize.js';
+import { ToolCallRegistry } from './acp/toolcalls.js';
 import { SessionManager, type SessionInfo } from './session/manager.js';
 import { PolicyEngine } from './policy/engine.js';
 import { ApprovalManager } from './approval/manager.js';
@@ -29,6 +32,27 @@ export interface BridgeOptions {
   paranoid: boolean;
   trace: boolean;
 }
+
+/**
+ * Read the Bridge version from package.json so the value reported to clients
+ * always matches the shipped build instead of a hand-maintained literal.
+ */
+function readBridgeVersion(): string {
+  try {
+    const here = join(fileURLToPath(import.meta.url), '..');
+    const pkgPath = resolve(here, '../package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+const BRIDGE_VERSION = readBridgeVersion();
+
+/** Commands that warrant the highest risk tier on the watch UI. */
+const DESTRUCTIVE_COMMAND_RE =
+  /\brm\s+-[a-z]*[rf]|\bsudo\b|\bdd\s+if=|\bmkfs\b|\bformat\s+[a-z]:|\bdel\s+\/[sq]\b|\bshutdown\b|\breboot\b|>\s*\/dev\/|\bchmod\s+777\b|\bgit\s+push\s+(--force|-f)\b/i;
 
 export async function startBridge(options: BridgeOptions): Promise<void> {
   const { mock, host, port, paranoid, trace } = options;
@@ -73,6 +97,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // ─── Initialize components ────────────────────────────────────────────────
 
   const sessionManager = new SessionManager();
+  const toolCalls = new ToolCallRegistry();
   const policyEngine = new PolicyEngine(paranoid);
   const approvalManager = new ApprovalManager();
   const authManager = new AuthManager();
@@ -94,6 +119,9 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // ─── Spawn ACP agent ──────────────────────────────────────────────────────
 
   const acpClient = new AcpClient({ kiroBin: agentBin, args: agentArgs, trace, traceLog });
+
+  // Single shared wrapper for all ACP method calls.
+  const methods = new AcpMethods(acpClient, BRIDGE_VERSION);
 
   let respawnCount = 0;
   const MAX_RESPAWNS = 3;
@@ -135,6 +163,15 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       const updateParams = params as SessionUpdateParams;
       const { sessionId, update } = updateParams;
 
+      // Remember tool call details so a later permission request (which only
+      // carries toolCallId + title) can be resolved to the real command/input.
+      if (
+        update.sessionUpdate === 'tool_call' ||
+        update.sessionUpdate === 'tool_call_update'
+      ) {
+        toolCalls.record(sessionId, update as unknown as Record<string, unknown>);
+      }
+
       // Normalize and push to event buffer
       const event = normalizeSessionUpdate(updateParams);
       sessionManager.pushEvent(sessionId, event);
@@ -173,26 +210,36 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   function handlePermissionRequest(acpRequestId: number | string, params: PermissionRequestParams): void {
     const { sessionId, toolCall } = params;
 
-    // Determine risk tier based on tool kind
-    const riskTier = determineRiskTier(toolCall.kind, toolCall.rawInput);
+    // Real kiro-cli sends a minimal toolCall here (id + title only). Merge in
+    // the details captured from the earlier `tool_call` notification so policy
+    // evaluation and client display operate on the real command/input.
+    const remembered = toolCalls.get(toolCall.toolCallId);
+    const kind = toolCall.kind ?? remembered?.kind;
+    const rawInput = toolCall.rawInput ?? remembered?.rawInput;
+    const title = toolCall.title ?? remembered?.title;
+    // Prefer Kiro's own tool name (e.g. "shell") for rule matching; fall back
+    // to the ACP kind, then the title.
+    const policyToolName = remembered?.kiroToolName ?? kind ?? title ?? 'unknown';
+
+    const riskTier = determineRiskTier(kind, rawInput);
 
     // Evaluate against policy engine
     const evaluation = policyEngine.evaluate({
-      toolName: toolCall.title ?? toolCall.kind ?? 'unknown',
-      rawInput: toolCall.rawInput,
+      toolName: policyToolName,
+      rawInput,
       cwd: sessionManager.getSession(sessionId)?.cwd ?? '',
     });
 
     if (evaluation.decision === 'allow') {
       // Auto-approve — respond immediately
-      const optionId = params.options.find((o) => o.kind === 'allow_once')?.optionId ?? 'allow-once';
+      const optionId = pickOptionId(params.options, 'allow');
       acpClient.respond(acpRequestId, { outcome: { outcome: 'selected', optionId } });
 
       // Broadcast resolution (AC2.2.6 — policy auto-resolutions are still emitted)
       wsHub.broadcast(sessionId, {
         v: 1,
         t: 'permission.resolved',
-        approvalId: `policy_${Date.now()}`,
+        approvalId: randomBytes(16).toString('hex'),
         decision: 'allow',
         resolution: 'policy',
         ruleId: evaluation.ruleId,
@@ -203,13 +250,13 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
     if (evaluation.decision === 'deny') {
       // Auto-deny — respond immediately
-      const optionId = params.options.find((o) => o.kind === 'reject_once')?.optionId ?? 'reject-once';
+      const optionId = pickOptionId(params.options, 'deny');
       acpClient.respond(acpRequestId, { outcome: { outcome: 'selected', optionId } });
 
       wsHub.broadcast(sessionId, {
         v: 1,
         t: 'permission.resolved',
-        approvalId: `policy_${Date.now()}`,
+        approvalId: randomBytes(16).toString('hex'),
         decision: 'deny',
         resolution: 'policy',
         ruleId: evaluation.ruleId,
@@ -218,10 +265,21 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       return;
     }
 
-    // Escalate — hold the ACP response and notify clients
+    // Escalate — hold the ACP response and notify clients.
     sessionManager.setAwaitingPermission(sessionId);
 
-    const approval = approvalManager.createApproval(acpRequestId, params, riskTier);
+    // Pass the enriched toolCall so the summary and toolInput reflect reality.
+    const enrichedParams: PermissionRequestParams = {
+      ...params,
+      toolCall: { ...toolCall, kind, rawInput, title },
+    };
+
+    const approval = approvalManager.createApproval(
+      acpRequestId,
+      enrichedParams,
+      riskTier,
+      policyToolName,
+    );
 
     // Broadcast permission request to all clients
     wsHub.broadcast(sessionId, {
@@ -272,7 +330,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       v: 1,
       t: 'hello',
       id,
-      bridgeVersion: '1.0.0',
+      bridgeVersion: BRIDGE_VERSION,
       protocolVersion: 1,
       mode: mock ? 'mock' : 'live',
       capabilities: ['sessions', 'permissions', 'events'],
@@ -365,7 +423,6 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     }
 
     try {
-      const methods = new AcpMethods(acpClient);
       const result = await methods.sessionNew(cwd);
       const info = sessionManager.createSession(result.sessionId, cwd);
       wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, result: info, ts: Date.now() });
@@ -384,7 +441,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, result: sessions, ts: Date.now() });
   }
 
-  async function handlePromptSend(client: ConnectedClient, frame: { id?: string; sessionId: string; text: string; source: string }): Promise<void> {
+  function handlePromptSend(client: ConnectedClient, frame: { id?: string; sessionId: string; text: string; source: string }): void {
     const { sessionId, text } = frame;
     const session = sessionManager.getSession(sessionId);
 
@@ -396,17 +453,42 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       return;
     }
 
-    try {
-      const methods = new AcpMethods(acpClient);
-      sessionManager.setWorking(sessionId);
-      await methods.sessionPrompt(sessionId, text);
-      wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
-    } catch (err) {
-      wsHub.sendToClient(client, {
-        v: 1, t: 'error', id: frame.id, code: 'AIBOU_INTERNAL',
-        message: `Failed to send prompt: ${err}`, retryable: true, ts: Date.now(),
+    sessionManager.setWorking(sessionId);
+
+    // ACP `session/prompt` does not resolve until the agent's whole turn ends,
+    // which can take minutes. Ack the forwarding immediately (AC1.5.1) and let
+    // turn progress arrive as `event` frames. The resolved value carries the
+    // authoritative end-of-turn `stopReason`.
+    methods
+      .sessionPrompt(sessionId, text)
+      .then((result) => {
+        const stopReason = result?.stopReason ?? 'end_turn';
+        sessionManager.completeTurn(sessionId, stopReason);
+        const info = sessionManager.getSession(sessionId);
+        if (info) {
+          wsHub.broadcast(sessionId, makeSessionStateFrame(info));
+        }
+      })
+      .catch((err: unknown) => {
+        sessionManager.setError(sessionId, `Prompt failed: ${String(err)}`);
+        const info = sessionManager.getSession(sessionId);
+        if (info) {
+          wsHub.broadcast(sessionId, makeSessionStateFrame(info));
+        }
+        wsHub.sendToClient(client, {
+          v: 1, t: 'error', code: 'AIBOU_INTERNAL',
+          message: `Prompt failed: ${String(err)}`, retryable: true, ts: Date.now(),
+        });
       });
-    }
+
+    wsHub.sendToClient(client, {
+      v: 1,
+      t: 'ack',
+      id: frame.id,
+      ok: true,
+      result: { seq: sessionManager.getLatestSeq(sessionId) },
+      ts: Date.now(),
+    });
   }
 
   function handlePermissionRespond(client: ConnectedClient, frame: { id?: string; approvalId: string; decision: 'allow' | 'deny' }): void {
@@ -430,22 +512,39 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
   }
 
-  async function handleSessionInterrupt(client: ConnectedClient, frame: { id?: string; sessionId: string }): Promise<void> {
+  function handleSessionInterrupt(client: ConnectedClient, frame: { id?: string; sessionId: string }): void {
     const { sessionId } = frame;
 
+    if (!sessionManager.getSession(sessionId)) {
+      wsHub.sendToClient(client, {
+        v: 1, t: 'error', id: frame.id, code: 'AIBOU_SESSION_NOT_FOUND',
+        message: `Session not found: ${sessionId}`, retryable: false, ts: Date.now(),
+      });
+      return;
+    }
+
+    // Any held approvals must be released so the agent is not left blocked
+    // on a prompt turn we are cancelling.
+    approvalManager.cancelAllForSession(sessionId);
+
+    // `session/cancel` is an ACP notification, so there is nothing to await.
+    // The agent confirms by resolving the in-flight `session/prompt` request
+    // with stopReason "cancelled", which completeTurn() then handles.
     try {
-      const methods = new AcpMethods(acpClient);
-      await methods.sessionCancel(sessionId);
-
-      // Cancel pending approvals for this session
-      approvalManager.cancelAllForSession(sessionId);
-
-      wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
+      methods.sessionCancel(sessionId);
     } catch (err) {
       wsHub.sendToClient(client, {
         v: 1, t: 'error', id: frame.id, code: 'AIBOU_UNSUPPORTED',
-        message: `Interrupt not supported: ${err}`, retryable: false, ts: Date.now(),
+        message: `Interrupt could not be sent: ${String(err)}`, retryable: false, ts: Date.now(),
       });
+      return;
+    }
+
+    // AC1.5.2: acknowledge and broadcast within 1s.
+    wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
+    const info = sessionManager.getSession(sessionId);
+    if (info) {
+      wsHub.broadcast(sessionId, makeSessionStateFrame(info));
     }
   }
 
@@ -455,16 +554,49 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     }
   }
 
+  /**
+   * Choose the option id to send back to ACP for a given decision.
+   *
+   * Option ids are agent-defined — real kiro-cli uses `allow_once` /
+   * `allow_always` / `reject_once`. Always resolve via the semantic `kind`
+   * field and only fall back to a literal if the agent sent no usable option.
+   */
+  function pickOptionId(
+    options: PermissionRequestParams['options'],
+    decision: 'allow' | 'deny',
+  ): string {
+    const preferred: Array<PermissionRequestParams['options'][number]['kind']> =
+      decision === 'allow' ? ['allow_once', 'allow_always'] : ['reject_once', 'reject_always'];
+
+    for (const kind of preferred) {
+      const match = options.find((o) => o.kind === kind);
+      if (match) return match.optionId;
+    }
+
+    // No option advertised the expected kind — fall back to the agent's own
+    // naming convention rather than inventing one.
+    return decision === 'allow' ? 'allow_once' : 'reject_once';
+  }
+
+  /**
+   * Classify risk from the ACP tool kind and the real command payload.
+   *
+   * Real kiro-cli reports shell commands with kind "execute"; the ACP spec also
+   * allows "other". Both are treated as command execution.
+   */
   function determineRiskTier(kind: string | undefined, rawInput: unknown): 'low' | 'medium' | 'high' {
-    if (kind === 'shell' || kind === 'command') {
-      const input = rawInput as Record<string, unknown> | undefined;
-      const command = (input?.command as string) ?? '';
-      // High risk: destructive commands
-      if (/rm\s+-rf|sudo|dd\s+|mkfs|format\s+/i.test(command)) return 'high';
+    const input = (rawInput ?? undefined) as Record<string, unknown> | undefined;
+    const command = typeof input?.command === 'string' ? input.command : '';
+
+    const isCommandKind =
+      kind === 'execute' || kind === 'shell' || kind === 'command';
+
+    if (isCommandKind || command.length > 0) {
+      if (DESTRUCTIVE_COMMAND_RE.test(command)) return 'high';
       return 'medium';
     }
     if (kind === 'delete') return 'high';
-    if (kind === 'write' || kind === 'edit') return 'medium';
+    if (kind === 'write' || kind === 'edit' || kind === 'move') return 'medium';
     return 'low';
   }
 
@@ -474,7 +606,6 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   spawnAgent();
 
   // Initialize ACP session
-  const methods = new AcpMethods(acpClient);
   try {
     const initResult = await methods.initialize();
     console.log(`✅ ACP agent initialized: ${initResult.agentInfo.name} v${initResult.agentInfo.version}`);
@@ -487,7 +618,13 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   // Start HTTP + WS server
   try {
-    await createHttpServer({ host, port, auth: authManager, wsHub: wsHub });
+    await createHttpServer({
+      host,
+      port,
+      auth: authManager,
+      wsHub,
+      version: BRIDGE_VERSION,
+    });
   } catch (err) {
     const msg = String(err);
     if (msg.includes('EADDRINUSE')) {
@@ -505,17 +642,29 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   const pairingCode = authManager.getPairingCode();
   const pairingUrl = authManager.getPairingUrl(host === '127.0.0.1' ? 'localhost' : host, port);
 
-  console.log(`
-┌─────────────────────────────────────────────┐
-│          ⛩️  Aibou Bridge v1.0.0             │
-├─────────────────────────────────────────────┤
-│  Mode:    ${mode.padEnd(33)}│
-│  Server:  http://${host}:${port}${' '.repeat(Math.max(0, 19 - host.length - String(port).length))}│
-│  Pairing: ${pairingCode}                              │
-└─────────────────────────────────────────────┘
+  console.log(
+    [
+      '',
+      '┌──────────────────────────────────────────────────────┐',
+      `│  ⛩️  Aibou Bridge v${BRIDGE_VERSION}`.padEnd(56) + '│',
+      '├──────────────────────────────────────────────────────┤',
+      `│  Mode:    ${mode}`.padEnd(56) + '│',
+      `│  Server:  http://${host}:${port}`.padEnd(55) + '│',
+      `│  Pairing: ${pairingCode}`.padEnd(55) + '│',
+      '└──────────────────────────────────────────────────────┘',
+      '',
+      `🛡️  Policy: ${policyEngine.describe()}`,
+      `📱 Pairing URL: ${pairingUrl}`,
+      '',
+    ].join('\n'),
+  );
 
-📱 Pairing URL: ${pairingUrl}
-`);
+  if (policyEngine.policySource === 'invalid') {
+    console.warn(
+      '⚠️  Your policy.json could not be loaded, so EVERY action will ask for approval.\n' +
+        '   Fix the file and restart, or delete it to use the built-in defaults.\n',
+    );
+  }
 
   // Generate QR code for pairing
   try {

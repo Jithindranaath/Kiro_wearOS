@@ -1,156 +1,279 @@
 # ACP Findings
 
-> This document records verified answers to the assumptions in `context.md` §8.
-> Updated as we verify each assumption against the real `kiro-cli`.
+Verified answers to the assumptions in `context.md` §8, captured by running the
+Bridge against a real `kiro-cli` ACP agent with `--trace` and reading the raw
+JSON-RPC frames from `~/.aibou/logs/acp-<date>.jsonl`.
 
 ## Environment
 
-- **kiro-cli version:** 2.3.0
-- **OS:** Windows 11
-- **Node.js:** v24.12.0
+| | |
+|---|---|
+| `kiro-cli` CLI version | 2.3.0 |
+| ACP agent reported version | **Kiro CLI Agent 2.18.1** |
+| ACP protocol version | 1 |
+| OS | Windows 11 |
+| Node.js | v24.12.0 |
 
 ---
 
-## Verified Assumptions
+## Corrections to Kiro's published docs
 
-### A1: ACP agent launch command ✅
+Two things on <https://kiro.dev/docs/cli/acp/> do not match the shipped agent.
+Both were found by tracing real frames, and both are load-bearing.
+
+### 1. `session/prompt` takes `prompt`, not `content`
+
+Kiro's docs page shows:
+
+```json
+{ "method": "session/prompt", "params": { "sessionId": "...", "content": [ ... ] } }
+```
+
+The real agent requires `prompt`, matching the
+[ACP v1 spec](https://agentclientprotocol.com/protocol/v1/prompt-turn):
+
+```json
+{ "method": "session/prompt", "params": { "sessionId": "...", "prompt": [ { "type": "text", "text": "..." } ] } }
+```
+
+**Observed failure with `content`:** the agent exits with code 0 immediately,
+producing no response and no error. The Bridge then reports
+`Agent exited while waiting for response to session/prompt`. Silent process
+death, no diagnostic.
+
+### 2. Session updates arrive as `session/update`
+
+The docs say updates are delivered via `session/notification`. Traced frames use
+`session/update`. The Bridge accepts both so it does not break if this changes.
+
+---
+
+## Verified assumptions
+
+### A1 — ACP launch command ✅
 
 ```bash
 kiro-cli acp
 ```
 
-Additional flags:
-- `--agent <AGENT>` — specify agent name
-- `--model <MODEL>` — specify model
-- `--trust-all-tools` — auto-approve all permissions
-- `--trust-tools <TOOL_NAMES>` — trust specific tools
-- `--agent-engine <ENGINE>` — "rust" (default) or "kas"
+Flags: `--agent`, `--model`, `--trust-all-tools`, `--trust-tools`,
+`--agent-engine <rust|kas>`. Aibou uses none of the trust flags; the policy
+engine supersedes them.
 
-### A2: Transport is JSON-RPC 2.0 over stdin/stdout ✅
+Override the binary with `AIBOU_KIRO_BIN`.
 
-Confirmed via the ACP docs. The agent communicates over stdin/stdout using JSON-RPC 2.0.
+### A2 — Transport ✅
 
-### A3: Method names ✅
+JSON-RPC 2.0, newline-delimited, over the child process's stdin/stdout.
 
-Confirmed from https://kiro.dev/docs/cli/acp/:
-- `initialize`
-- `session/new`
-- `session/load`
-- `session/prompt`
-- `session/cancel`
-- `session/set_mode`
-- `session/set_model`
+### A3 — Method names ✅
 
-### A4: Session update notifications ✅
+`initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`,
+`session/set_mode`, `session/set_model`.
 
-The agent sends `session/update` notifications with these update types:
-- `agent_message_chunk` — streaming text/content
-- `tool_call` — tool invocation with name, params, status
-- `tool_call_update` — progress updates for running tools
-- `turn_end` — signals agent turn completed (mapped as `TurnEnd` in docs)
+### A4 — Session update notifications ✅
 
-### A5: Permission requests ✅ CRITICAL
+Method: `session/update`, params `{ sessionId, update }`. Observed
+`update.sessionUpdate` values:
 
-Method: `session/request_permission`
+| Value | Meaning |
+|---|---|
+| `agent_message_chunk` | Streaming assistant text. Carries optional `messageId`. |
+| `agent_thought_chunk` | Streaming reasoning text. |
+| `tool_call` | New tool invocation. Carries `kind`, `rawInput`, `_meta`. |
+| `tool_call_update` | Status/content update for an existing `toolCallId`. |
+| `plan` | Task list (`entries[]`). |
+| `usage_update` | Real token usage: `used`, `size`, optional `cost`. |
 
-This is a JSON-RPC **request** from agent to client (has an `id`).
-The client holds it open and responds with the user's decision.
+Text arrives in very small chunks — a one-sentence reply was split across 30+
+`agent_message_chunk` frames.
 
-**Request shape:**
+### A5 — Permission requests ✅ (critical)
+
+Method: `session/request_permission`. It is a **request** with an `id`, so the
+agent blocks until answered. This is the mechanism Aibou is built on.
+
+**The permission request is minimal.** Real frame:
+
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 5,
+  "id": "5aa73b0d-3932-4144-84ce-75ed2ca2f2f3",
   "method": "session/request_permission",
   "params": {
-    "sessionId": "sess_abc123def456",
+    "sessionId": "e152157f-fd47-4da8-bdf7-1a47df0367ff",
     "toolCall": {
-      "toolCallId": "call_001",
-      "title": "...",
-      "kind": "shell",
-      "status": "pending",
-      "rawInput": { ... }
+      "toolCallId": "tooluse_KzQPRMhH6QYtQdcV74o66m",
+      "title": "Running: node --version"
     },
     "options": [
-      { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
-      { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
-    ]
+      { "optionId": "allow_once",   "name": "Yes",    "kind": "allow_once" },
+      { "optionId": "allow_always", "name": "Always", "kind": "allow_always" },
+      { "optionId": "reject_once",  "name": "No",     "kind": "reject_once" }
+    ],
+    "_meta": {
+      "trustOptions": [
+        { "label": "Full command", "display": "node --version", "patterns": ["node \\-\\-version"] },
+        { "label": "Base command", "display": "node *",         "patterns": ["node( .*)?"] }
+      ]
+    }
   }
 }
 ```
+
+`toolCall` contains **only** `toolCallId` and `title` — no `kind`, no
+`rawInput`. The command lives in the earlier `tool_call` notification sharing the
+same `toolCallId`:
+
+```json
+{
+  "method": "session/update",
+  "params": {
+    "sessionId": "e152157f-...",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "tooluse_KzQPRMhH6QYtQdcV74o66m",
+      "title": "Running: node --version",
+      "kind": "execute",
+      "rawInput": {
+        "__tool_use_purpose": "Run node --version as requested by the user",
+        "command": "node --version"
+      },
+      "_meta": { "kiro": { "toolName": "shell" } }
+    }
+  }
+}
+```
+
+**Consequences for the implementation:**
+
+1. The Bridge keeps a `ToolCallRegistry` (`acp/toolcalls.ts`) mapping
+   `toolCallId` → `{ kind, rawInput, title, kiroToolName }`, populated from
+   `tool_call` / `tool_call_update`, and merges it into the permission request.
+   Without this, `toolInput` reaches the clients as `undefined` and the policy
+   engine has no command to match.
+2. `_meta.kiro.toolName` (e.g. `"shell"`) is the real tool identifier and is what
+   policy rules match on. The ACP `kind` (`"execute"`) is the fallback.
+3. Option ids are **snake_case** (`allow_once`, `reject_once`). Never assume
+   hyphenated ids. Always resolve via the semantic `kind` field.
 
 **Response shape:**
+
+```json
+{ "jsonrpc": "2.0", "id": "5aa73b0d-...", "result": { "outcome": { "outcome": "selected", "optionId": "allow_once" } } }
+```
+
+Or on cancellation: `{ "outcome": { "outcome": "cancelled" } }`.
+
+### A6 — Advertised capabilities ✅
+
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "outcome": {
-      "outcome": "selected",
-      "optionId": "allow-once"
-    }
-  }
+  "protocolVersion": 1,
+  "agentCapabilities": {
+    "loadSession": true,
+    "promptCapabilities": { "image": true, "audio": false, "embeddedContext": false },
+    "mcpCapabilities": { "http": true, "sse": false },
+    "sessionCapabilities": {},
+    "auth": {}
+  },
+  "authMethods": [],
+  "agentInfo": { "name": "Kiro CLI Agent", "title": "Kiro CLI Agent", "version": "2.18.1" }
 }
 ```
 
-Or on cancellation:
+### A7 — Kiro extensions ✅
+
+Namespaced `_kiro.dev/`, safely ignorable. Observed in traces:
+`_kiro.dev/subagent/list_update`, `_kiro.dev/commands/available`,
+`_kiro.dev/metadata`, `_kiro.dev/session/update`. All fall through to
+`event.kind: "unknown"` with the payload preserved (AC1.3.5).
+
+### A8 — CLI hooks — not used
+
+Hooks remain a secondary enrichment channel. Nothing P0 depends on them, and the
+implemented feature set did not require them.
+
+### A9 — Token / context usage ✅ **available**
+
+Contrary to the original assumption, real usage **is** exposed, via the
+`usage_update` session update:
+
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "outcome": {
-      "outcome": "cancelled"
-    }
-  }
-}
+{ "sessionUpdate": "usage_update", "used": 53000, "size": 200000, "cost": { "amount": 0.045, "currency": "USD" } }
 ```
 
-### A6: Capabilities ✅
+`used` and `size` are token counts; `cost` is optional with an ISO 4217
+currency. The Bridge normalises this to `event.kind: "usage"` and forwards the
+numbers **verbatim**. It never synthesises them — if the agent sends no
+`usage_update`, no usage event is emitted and clients render `—`.
 
-From the initialize response:
-- `loadSession: true`
-- `promptCapabilities.image: true`
+### A10 — Cancellation ✅
 
-### A7: Kiro extensions ✅
+`session/cancel` is a **notification**, not a request. The agent never replies to
+it directly. Confirmation arrives as the pending `session/prompt` response with
+`stopReason: "cancelled"`.
 
-Prefixed with `_kiro.dev/` per ACP spec. Safely ignorable. Known extensions:
-- `_kiro.dev/commands/execute`
-- `_kiro.dev/commands/options`
-- `_kiro.dev/commands/available`
-- `_kiro.dev/mcp/oauth_request`
-- `_kiro.dev/mcp/server_initialized`
-- `_kiro.dev/compaction/status`
-- `_kiro.dev/clear/status`
-- `_session/terminate`
-
-### A8: CLI hooks — TODO
-
-Need to verify with a real hook.
-
-### A9: Token/context usage — TODO
-
-Need to inspect live ACP frames for usage fields. If absent, drop the feature.
-
-### A10: Cancellation ✅
-
-Method: `session/cancel`
-
-Confirmed in the ACP docs as a core protocol method.
+Treating it as a request would leave the caller awaiting a response that never
+comes.
 
 ---
 
-## Key Insights
+## Prompt turn lifecycle (as observed)
 
-1. The permission request is a JSON-RPC **request** (not a notification). This means
-   the agent BLOCKS waiting for our response. This is exactly what we need — we can
-   hold the response indefinitely until the phone/watch user responds.
+```
+client → session/prompt (id=N)            request, stays open for the whole turn
+agent  → session/update tool_call         full rawInput + _meta.kiro.toolName
+agent  → session/request_permission (id=M) minimal toolCall; blocks the agent
+client → response to id=M                 { outcome: { outcome, optionId } }
+agent  → session/update tool_call_update  real command output
+agent  → session/update agent_message_chunk × N
+agent  → response to id=N                 { stopReason: "end_turn" }   ← turn ends here
+```
 
-2. The `toolCall` field in the permission request gives us `title`, `kind`, and
-   `rawInput` — enough to build the `summary` field and determine `riskTier`.
+**There is no `turn_end` notification.** End of turn is the `session/prompt`
+response. `stopReason` is one of `end_turn`, `max_tokens`, `max_turn_requests`,
+`refusal`, `cancelled`.
 
-3. The `options` array tells us what responses the agent accepts. We should forward
-   these to the client rather than hardcoding allow/deny.
+Two implementation requirements follow:
 
-4. `--trust-all-tools` and `--trust-tools` are the CLI's built-in equivalent of our
-   policy engine. Our engine supersedes them (we won't use those flags).
+1. `session/prompt` must not be awaited before acking the client. A real turn
+   takes many seconds to minutes; blocking the ack makes the UI look dead.
+   Aibou acks immediately and resolves the turn asynchronously.
+2. Session status must be driven to `idle` from the `stopReason`, not from a
+   notification.
+
+## Measured latencies (real agent, warm)
+
+| Operation | Observed |
+|---|---|
+| `initialize` round-trip | ~2.0 s |
+| `session/new` round-trip | ~3.4 s |
+| First `tool_call` after prompt | ~2–4 s |
+| Permission request → client frame | < 250 ms (Bridge-side) |
+
+`session/new` taking over 3 seconds is why client-side timeouts must be generous;
+a 3 s timeout fails intermittently.
+
+## What kiro-cli asks permission for
+
+Only some tools escalate. In testing:
+
+- **Shell commands** (`_meta.kiro.toolName: "shell"`, `kind: "execute"`) →
+  always requested permission.
+- **File reads** (`kind: "read"`) → never requested permission; the agent
+  self-approves, so the request never reaches Aibou's policy engine.
+
+The policy engine can therefore only govern what the agent chooses to ask about.
+This is a property of the agent, not a limitation of the policy engine, and is
+stated plainly in the README.
+
+## Reproducing
+
+```bash
+pnpm --filter @aibou/bridge build
+node packages/bridge/dist/index.js --trace
+node scripts/live-probe.mjs <pairing-code> "Run the shell command 'node --version'."
+```
+
+Frames are written to `~/.aibou/logs/acp-<date>.jsonl`.

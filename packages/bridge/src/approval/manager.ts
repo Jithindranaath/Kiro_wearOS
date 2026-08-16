@@ -40,6 +40,33 @@ export interface ApprovalResolution {
 
 const DEFAULT_TIMEOUT_MS = 900_000; // 15 minutes
 
+/** Max characters for a watch-safe summary (AC2.1.2). */
+const SUMMARY_MAX_LEN = 80;
+
+/** Collapse newlines/tabs so a multi-line command stays single-line on a watch. */
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/** Truncate to the watch budget without splitting a surrogate pair. */
+function truncate(value: string): string {
+  if (value.length <= SUMMARY_MAX_LEN) return value;
+  let cut = SUMMARY_MAX_LEN - 1;
+  const code = value.charCodeAt(cut - 1);
+  // Avoid slicing between a high and low surrogate.
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return value.slice(0, cut) + '…';
+}
+
+function basename(pathLike: string): string {
+  const parts = pathLike.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : pathLike;
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 export class ApprovalManager extends EventEmitter {
   private pending = new Map<string, PendingApproval>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -58,6 +85,8 @@ export class ApprovalManager extends EventEmitter {
     acpRequestId: number | string,
     params: PermissionRequestParams,
     riskTier: RiskTier,
+    /** Resolved tool identifier (Kiro tool name or ACP kind) for display. */
+    toolName?: string,
   ): PendingApproval {
     const approvalId = randomBytes(16).toString('hex');
     const now = Date.now();
@@ -68,7 +97,7 @@ export class ApprovalManager extends EventEmitter {
       approvalId,
       acpRequestId,
       sessionId: params.sessionId,
-      toolName: params.toolCall.title ?? params.toolCall.kind ?? 'unknown',
+      toolName: toolName ?? params.toolCall.kind ?? params.toolCall.title ?? 'unknown',
       summary,
       toolInput: params.toolCall.rawInput,
       riskTier,
@@ -116,10 +145,23 @@ export class ApprovalManager extends EventEmitter {
       this.timers.delete(approvalId);
     }
 
-    // Determine the optionId to send back to ACP
-    const optionId = decision === 'allow'
-      ? approval.options.find((o) => o.kind === 'allow_once' || o.kind === 'allow_always')?.optionId ?? 'allow-once'
-      : approval.options.find((o) => o.kind === 'reject_once' || o.kind === 'reject_always')?.optionId ?? 'reject-once';
+    // Resolve the agent-defined option id via the semantic `kind` field.
+    // Real kiro-cli uses snake_case ids (allow_once / reject_once), so never
+    // assume a hyphenated literal.
+    const preferredKinds =
+      decision === 'allow'
+        ? (['allow_once', 'allow_always'] as const)
+        : (['reject_once', 'reject_always'] as const);
+
+    let optionId: string | undefined;
+    for (const kind of preferredKinds) {
+      const match = approval.options.find((o) => o.kind === kind);
+      if (match) {
+        optionId = match.optionId;
+        break;
+      }
+    }
+    optionId ??= decision === 'allow' ? 'allow_once' : 'reject_once';
 
     // Emit resolution event
     const resolutionEvent: ApprovalResolution = {
@@ -178,42 +220,44 @@ export class ApprovalManager extends EventEmitter {
     const { toolCall } = params;
     const title = toolCall.title ?? '';
     const kind = toolCall.kind ?? '';
+    const input = (toolCall.rawInput ?? undefined) as Record<string, unknown> | undefined;
 
-    // For shell commands, show the command
-    if (kind === 'shell' || kind === 'command') {
-      const input = toolCall.rawInput as Record<string, unknown> | undefined;
-      const command = input?.command as string | undefined;
-      if (command) {
-        const trimmed = command.length > 75 ? command.slice(0, 72) + '...' : command;
-        return `Run: ${trimmed}`;
+    const firstString = (...keys: string[]): string | undefined => {
+      for (const key of keys) {
+        const value = input?.[key];
+        if (typeof value === 'string' && value.length > 0) return value;
       }
+      return undefined;
+    };
+
+    // Command execution. Real kiro-cli reports kind "execute".
+    const command = firstString('command', 'cmd');
+    if (command && (kind === 'execute' || kind === 'shell' || kind === 'command' || kind === '')) {
+      return truncate(`Run: ${collapseWhitespace(command)}`);
     }
 
-    // For file operations, show the path
+    // File writes / edits
     if (kind === 'write' || kind === 'edit') {
-      const input = toolCall.rawInput as Record<string, unknown> | undefined;
-      const path = (input?.path ?? input?.file ?? input?.targetFile) as string | undefined;
-      if (path) {
-        const basename = path.split(/[\\/]/).pop() ?? path;
-        return `Write: ${basename}`;
-      }
+      const path = firstString('path', 'file', 'targetFile', 'filePath', 'file_path');
+      if (path) return truncate(`Write: ${basename(path)}`);
     }
 
-    // For file deletion
+    // File deletion
     if (kind === 'delete') {
-      const input = toolCall.rawInput as Record<string, unknown> | undefined;
-      const path = (input?.path ?? input?.targetFile) as string | undefined;
-      if (path) {
-        const basename = path.split(/[\\/]/).pop() ?? path;
-        return `Delete: ${basename}`;
-      }
+      const path = firstString('path', 'targetFile', 'filePath', 'file_path');
+      if (path) return truncate(`Delete: ${basename(path)}`);
     }
 
-    // Fallback: use title, truncated
-    if (title) {
-      return title.length > 80 ? title.slice(0, 77) + '...' : title;
+    // Reads / fetches
+    if (kind === 'read' || kind === 'fetch' || kind === 'search') {
+      const target = firstString('path', 'file', 'url', 'query', 'pattern');
+      if (target) return truncate(`${capitalize(kind)}: ${basename(target)}`);
     }
 
-    return `Tool: ${kind || 'unknown'}`;
+    // Fall back to the agent's own title, which is always human readable.
+    if (title) return truncate(collapseWhitespace(title));
+
+    // Last resort: a generic label. Never fabricate specifics.
+    return truncate(kind ? `Tool: ${kind}` : 'Approval required');
   }
 }

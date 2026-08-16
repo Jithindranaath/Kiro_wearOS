@@ -23,7 +23,9 @@ export function SessionList({ sessions, activeSessionId, onSelect }: SessionList
   if (sessions.size === 0) {
     return (
       <div className="p-4 text-gray-500 text-sm text-center">
-        No active sessions. Create one from the Bridge or send a prompt.
+        No active sessions.
+        <br />
+        Tap <span className="text-blue-400 font-medium">+ New</span> to start one.
       </div>
     );
   }

@@ -28,6 +28,18 @@ export function normalizeSessionUpdate(params: SessionUpdateParams): NormalizedE
         payload: {
           text: content?.text ?? '',
           contentType: content?.type ?? 'text',
+          messageId: update.messageId,
+        },
+      };
+    }
+
+    case 'agent_thought_chunk': {
+      const content = update.content as { text?: string; type?: string } | undefined;
+      return {
+        kind: 'agent.thought',
+        payload: {
+          text: content?.text ?? '',
+          messageId: update.messageId,
         },
       };
     }
@@ -51,6 +63,24 @@ export function normalizeSessionUpdate(params: SessionUpdateParams): NormalizedE
           toolCallId: update.toolCallId,
           status: update.status,
           content: update.content,
+        },
+      };
+
+    case 'plan':
+      return {
+        kind: 'task.update',
+        payload: { entries: update.entries },
+      };
+
+    case 'usage_update':
+      // Real numbers straight from the agent — never synthesised. Emitted only
+      // because the agent sent them (see context.md §6 honesty rule).
+      return {
+        kind: 'usage',
+        payload: {
+          used: update.used,
+          size: update.size,
+          cost: update.cost,
         },
       };
 

@@ -13,6 +13,7 @@
     "dev": "tsx watch src/index.ts",
     "demo": "tsx src/index.ts --mock",
     "start": "node dist/index.js",
+    "live": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "echo ok"

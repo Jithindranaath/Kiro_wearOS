@@ -16,6 +16,13 @@ import dev.aibou.wear.ui.*
 import dev.aibou.wear.ui.theme.AibouWearTheme
 
 /**
+ * Android emulator host loopback. Only a pre-filled default — the user can
+ * edit both host and port on the pairing screen.
+ */
+private const val DEFAULT_BRIDGE_HOST = "10.0.2.2"
+private const val DEFAULT_BRIDGE_PORT = 8787
+
+/**
  * MainActivity — entry point for the Aibou Wear OS app.
  *
  * Standalone app (D4) — connects directly to Bridge over Wi-Fi,
@@ -78,7 +85,10 @@ fun AibouApp(
         composable("pair") {
             PairScreen(
                 client = client,
-                defaultUrl = "http://10.0.2.2:8787", // Emulator default
+                // Pre-filled for the Android emulator's host loopback; editable
+                // on-device so a physical watch can target a LAN address.
+                defaultHost = DEFAULT_BRIDGE_HOST,
+                defaultPort = DEFAULT_BRIDGE_PORT,
                 onPaired = {
                     client.connect()
                     navController.navigate("status") {

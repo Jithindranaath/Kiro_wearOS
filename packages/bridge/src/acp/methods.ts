@@ -42,9 +42,30 @@ export interface SessionNewResult {
   sessionId: string;
 }
 
+/**
+ * `session/prompt` params.
+ *
+ * NOTE: the content array field is named `prompt`, per the ACP v1 spec
+ * (https://agentclientprotocol.com/protocol/v1/prompt-turn). Kiro's docs page
+ * shows `content`, which the real agent rejects — verified against
+ * kiro-cli 2.18.1, see docs/acp-findings.md.
+ */
 export interface SessionPromptParams {
   sessionId: string;
-  content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+  prompt: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+}
+
+/** Reason the agent stopped a prompt turn. */
+export type StopReason =
+  | 'end_turn'
+  | 'max_tokens'
+  | 'max_turn_requests'
+  | 'refusal'
+  | 'cancelled';
+
+/** Response to `session/prompt`; arrives only when the whole turn is finished. */
+export interface SessionPromptResult {
+  stopReason: StopReason;
 }
 
 export interface SessionCancelParams {
@@ -85,14 +106,46 @@ export interface SessionUpdateParams {
 
 export type SessionUpdate =
   | AgentMessageChunkUpdate
+  | AgentThoughtChunkUpdate
   | ToolCallUpdate
   | ToolCallProgressUpdate
+  | PlanUpdate
+  | UsageUpdate
   | TurnEndUpdate
   | UnknownUpdate;
 
 export interface AgentMessageChunkUpdate {
   sessionUpdate: 'agent_message_chunk';
+  /** Opaque id grouping chunks into one logical message. */
+  messageId?: string;
   content: { type: string; text?: string } | undefined;
+}
+
+export interface AgentThoughtChunkUpdate {
+  sessionUpdate: 'agent_thought_chunk';
+  messageId?: string;
+  content: { type: string; text?: string } | undefined;
+}
+
+/** Agent's task list for the current turn. */
+export interface PlanUpdate {
+  sessionUpdate: 'plan';
+  entries: Array<{
+    content: string;
+    priority?: string;
+    status?: string;
+  }>;
+}
+
+/**
+ * Real context/cost usage reported by the agent.
+ * `used` and `size` are token counts; `cost` is optional.
+ */
+export interface UsageUpdate {
+  sessionUpdate: 'usage_update';
+  used: number;
+  size: number;
+  cost?: { amount: number; currency: string };
 }
 
 export interface ToolCallUpdate {
@@ -125,7 +178,10 @@ export interface UnknownUpdate {
 // ─── Method wrappers ─────────────────────────────────────────────────────────
 
 export class AcpMethods {
-  constructor(private client: AcpClient) {}
+  constructor(
+    private client: AcpClient,
+    private clientVersion: string = '0.0.0',
+  ) {}
 
   async initialize(): Promise<InitializeResult> {
     const params: InitializeParams = {
@@ -136,7 +192,7 @@ export class AcpMethods {
       },
       clientInfo: {
         name: 'aibou-bridge',
-        version: '1.0.0',
+        version: this.clientVersion,
       },
     };
     return (await this.client.request('initialize', params)) as InitializeResult;
@@ -147,17 +203,28 @@ export class AcpMethods {
     return (await this.client.request('session/new', params)) as SessionNewResult;
   }
 
-  async sessionPrompt(sessionId: string, text: string): Promise<unknown> {
+  /**
+   * Start a prompt turn. The returned promise only settles when the agent
+   * finishes the entire turn, so callers must not block a client ack on it.
+   */
+  async sessionPrompt(sessionId: string, text: string): Promise<SessionPromptResult> {
     const params: SessionPromptParams = {
       sessionId,
-      content: [{ type: 'text', text }],
+      prompt: [{ type: 'text', text }],
     };
-    return await this.client.request('session/prompt', params);
+    return (await this.client.request('session/prompt', params)) as SessionPromptResult;
   }
 
-  async sessionCancel(sessionId: string): Promise<unknown> {
+  /**
+   * Cancel the in-flight prompt turn.
+   *
+   * Per the ACP v1 spec this is a NOTIFICATION, not a request — the agent never
+   * replies to it. Confirmation arrives as the `session/prompt` response with
+   * `stopReason: "cancelled"`.
+   */
+  sessionCancel(sessionId: string): void {
     const params: SessionCancelParams = { sessionId };
-    return await this.client.request('session/cancel', params);
+    this.client.notify('session/cancel', params);
   }
 
   /**

@@ -8,10 +8,17 @@ import { SessionList } from './components/SessionList.js';
 import { EventStream } from './components/EventStream.js';
 import { ApprovalCard } from './components/ApprovalCard.js';
 import { PromptInput } from './components/PromptInput.js';
+import { NewSessionDialog } from './components/NewSessionDialog.js';
+
+/** Correlation id used for the session.create request/response pair. */
+const CREATE_SESSION_FRAME_ID = 'pwa-session-create';
 
 export function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const wsRef = useRef<WsClient | null>(null);
 
   // Check if already paired
@@ -77,8 +84,27 @@ export function App() {
         dispatch({ type: 'PERMISSION_RESOLVED', approvalId: f.approvalId as string });
         break;
 
+      case 'ack':
+        // Session creation succeeded — close the dialog and select the new session
+        if (f.id === CREATE_SESSION_FRAME_ID) {
+          setCreating(false);
+          setCreateError(null);
+          setDialogOpen(false);
+          const created = f.result as { id?: string } | undefined;
+          if (created?.id) {
+            setActiveSessionId(created.id);
+          }
+        }
+        break;
+
       case 'error':
-        dispatch({ type: 'SET_ERROR', error: f.message as string });
+        // Route session-creation errors to the dialog, everything else to the toast
+        if (f.id === CREATE_SESSION_FRAME_ID) {
+          setCreating(false);
+          setCreateError(f.message as string);
+        } else {
+          dispatch({ type: 'SET_ERROR', error: f.message as string });
+        }
         break;
     }
   }, [activeSessionId]);
@@ -156,6 +182,18 @@ export function App() {
     });
   };
 
+  const handleCreateSession = (cwd: string) => {
+    setCreating(true);
+    setCreateError(null);
+    wsRef.current?.send({
+      v: 1,
+      t: 'session.create',
+      id: CREATE_SESSION_FRAME_ID,
+      cwd,
+      ts: Date.now(),
+    });
+  };
+
   // Show pairing screen if not connected
   if (!paired) {
     return <PairScreen onPaired={handlePaired} />;
@@ -185,8 +223,19 @@ export function App() {
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Sidebar — Session list */}
         <aside className="w-full md:w-64 border-b md:border-b-0 md:border-r border-gray-700 overflow-y-auto">
-          <div className="p-3 border-b border-gray-700">
+          <div className="p-3 border-b border-gray-700 flex items-center justify-between">
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Sessions</h2>
+            <button
+              onClick={() => {
+                setCreateError(null);
+                setDialogOpen(true);
+              }}
+              disabled={state.connectionState !== 'connected'}
+              className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 rounded transition-colors"
+              title="Create a new session"
+            >
+              + New
+            </button>
           </div>
           <SessionList
             sessions={state.sessions}
@@ -225,6 +274,14 @@ export function App() {
           />
         </main>
       </div>
+
+      <NewSessionDialog
+        open={dialogOpen}
+        creating={creating}
+        error={createError}
+        onCreate={handleCreateSession}
+        onClose={() => setDialogOpen(false)}
+      />
 
       {/* Error toast */}
       {state.error && (

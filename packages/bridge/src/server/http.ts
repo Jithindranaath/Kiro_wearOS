@@ -18,11 +18,12 @@ export interface HttpServerOptions {
   port: number;
   auth: AuthManager;
   wsHub: WsHub;
+  version: string;
   pwaPath?: string;
 }
 
 export async function createHttpServer(options: HttpServerOptions): Promise<FastifyInstance> {
-  const { host, port, auth, wsHub, pwaPath } = options;
+  const { host, port, auth, wsHub, version, pwaPath } = options;
 
   const app = Fastify({
     logger: false,
@@ -65,7 +66,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Fast
   app.get('/api/health', async (_request, reply) => {
     return reply.send({
       status: 'ok',
-      version: '1.0.0',
+      version,
       uptime: process.uptime(),
       clients: wsHub.clientCount,
     });

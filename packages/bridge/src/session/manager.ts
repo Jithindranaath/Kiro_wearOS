@@ -206,6 +206,44 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Complete a prompt turn using the `stopReason` returned by ACP
+   * `session/prompt`. This is the authoritative end-of-turn signal in ACP v1 —
+   * the real agent does not send a `turn_end` notification.
+   */
+  completeTurn(sessionId: string, stopReason: string): void {
+    const state = this.sessions.get(sessionId);
+    if (!state) return;
+
+    state.info.lastActivity = Date.now();
+
+    if (stopReason === 'refusal') {
+      state.info.status = 'error';
+      state.info.statusSource = 'observed';
+      state.info.statusReason = 'Agent refused to continue the turn.';
+    } else if (
+      stopReason === 'end_turn' &&
+      !state.hadToolCallInSegment &&
+      endsWithQuestion(state.lastAgentText)
+    ) {
+      // Heuristic — see docs/status-inference.md
+      state.info.status = 'awaiting_input';
+      state.info.statusSource = 'inferred';
+      state.info.statusReason =
+        'Turn ended with a question and no tool call — agent may be waiting for input.';
+    } else {
+      state.info.status = 'idle';
+      state.info.statusSource = 'observed';
+      state.info.statusReason =
+        stopReason === 'end_turn' ? undefined : `Turn stopped: ${stopReason}`;
+    }
+
+    state.lastAgentText = '';
+    state.hadToolCallInSegment = false;
+
+    this.emit('session.state', state.info);
+  }
+
+  /**
    * Set status to working (e.g., when a prompt is sent).
    */
   setWorking(sessionId: string): void {

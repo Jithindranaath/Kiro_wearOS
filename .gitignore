@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 dist/
 *.tsbuildinfo
 .env
@@ -8,10 +8,17 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+
+# IDE
 .vscode/
 .idea/
 *.iml
+
+# Wear OS build outputs
 wear/app/build/
 wear/.gradle/
 wear/build/
 wear/local.properties
+
+# Local-only verification notes
+demo.md
