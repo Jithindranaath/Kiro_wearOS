@@ -71,8 +71,19 @@ kiro-cli (ACP) ←stdin/stdout→ Aibou Bridge (Node) ←WebSocket→ Phone PWA 
 - **PWA Installable**: Web manifest + service worker, passes Chrome installability check
 - **Served from Bridge**: Single origin, no CORS needed — `pnpm run demo` serves everything on :8787
 
-### 🔲 Phase 3: Wear OS App (Next)
-### 🔲 Phase 4: Polish & Submit
+### ✅ Phase 3: Wear OS App (Complete)
+
+- **Standalone app** — connects directly to Bridge over Wi-Fi, no phone companion (D4)
+- **PairScreen**: 6-digit number pad keypad, stores token in EncryptedSharedPreferences
+- **StatusScreen**: Session name (cwd basename), live status with color, elapsed time, pending approval badge, mock mode badge, inferred status marker
+- **ApprovalScreen**: Summary at ≥16sp, full-width Approve/Deny chips ≥48dp tall, vibrate + wake screen on arrival, auto-dismiss when resolved by another client
+- **VoiceScreen (P1)**: RecognizerIntent speech capture, transcript confirmation before sending, hidden if unavailable
+- **AibouClient**: OkHttp WebSocket, auth + subscribe, StateFlow<UiState>, exponential backoff reconnect (1s→30s)
+- **Haptics**: Risk-tier-based vibration patterns (gentle=low, medium=default, strong=high)
+- **Network security**: Cleartext allowed only for 10.0.2.2 (emulator) and RFC1918 (LAN dev)
+- **Navigation**: SwipeDismissableNavHost — pair → status → approval, swipe to interrupt
+
+### 🔲 Phase 4: Polish & Submit (Next)
 
 ## Features
 
@@ -84,7 +95,7 @@ kiro-cli (ACP) ←stdin/stdout→ Aibou Bridge (Node) ←WebSocket→ Phone PWA 
 | Event stream with replay | ✅ | Ring buffer, monotonic seq, no gaps |
 | Pairing & auth | ✅ | 6-digit code, bearer tokens, rate limiting |
 | Mock mode | ✅ | For testing without Kiro credentials |
-| Watch approval | 🔲 | Wear OS standalone |
+| Watch approval | ✅ | Wear OS standalone (Compose for Wear) |
 | Token/credit usage | ❌ | Not exposed by ACP (honest absence, not faked) |
 
 ## Mock Mode

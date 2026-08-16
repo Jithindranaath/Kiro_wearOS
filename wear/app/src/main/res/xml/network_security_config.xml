@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security config for development:
+    Allows cleartext HTTP to the emulator loopback (10.0.2.2)
+    and RFC1918 private addresses for LAN development.
+    
+    IMPORTANT for judges: The Bridge on the host machine is accessible
+    at 10.0.2.2:8787 from inside the Wear OS emulator.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- Emulator host loopback -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- RFC1918 private networks for LAN -->
+        <domain includeSubdomains="true">192.168.0.0</domain>
+        <domain includeSubdomains="true">10.0.0.0</domain>
+        <domain includeSubdomains="true">172.16.0.0</domain>
+        <!-- localhost for testing -->
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
