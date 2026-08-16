@@ -22,7 +22,7 @@ Kiro for iOS (launched June 2025) supervises sessions running in AWS cloud sandb
 ```bash
 git clone <repo-url> && cd aibou
 pnpm install
-pnpm run demo        # starts Bridge in mock mode + serves PWA
+pnpm run demo        # starts Bridge in mock mode on :8787
 ```
 
 Open `http://localhost:8787` on your phone (same LAN). Done.
@@ -32,24 +32,46 @@ Open `http://localhost:8787` on your phone (same LAN). Done.
 ## Architecture
 
 ```
-kiro-cli (ACP) ←→ Aibou Bridge (Node) ←→ Phone PWA / Wear OS Watch
-                   └── Policy Engine
+kiro-cli (ACP) ←stdin/stdout→ Aibou Bridge (Node) ←WebSocket→ Phone PWA / Wear OS Watch
+                                └── Policy Engine (allow/deny/escalate)
+                                └── Approval Manager (holds ACP responses)
+                                └── Session Manager (ring buffer, status)
 ```
 
-- **Bridge**: Spawns `kiro-cli acp` as subprocess, owns the permission flow
+- **Bridge**: Spawns `kiro-cli acp` as subprocess, owns the permission flow via JSON-RPC 2.0
+- **Policy Engine**: Evaluates tool calls against configurable rules. Fail-closed: unmatched = escalate.
+- **Approval Manager**: Holds ACP `session/request_permission` responses until phone/watch user taps approve/deny.
 - **PWA**: Full client — sessions, events, approvals, prompting
 - **Wear OS**: Glanceable — approve/deny in under 3 seconds
+
+## Current State
+
+### ✅ Phase 1: Bridge Core (Complete)
+
+- **ACP Client**: JSON-RPC 2.0 over stdin/stdout, request/response correlation, incoming request handling
+- **Session Manager**: Create/list sessions, status derivation (observed + inferred), 500-event ring buffer with replay-since
+- **Policy Engine**: Rule evaluation (deny > escalate > allow), default rules for reads/writes/shell/secrets, paranoid mode, fail-closed
+- **Approval Manager**: Hold ACP permission requests, timeout → deny, idempotent resolution, summary generation
+- **HTTP Server**: Fastify with `/api/pair` (6-digit code → token), `/api/health`, static PWA serving
+- **WebSocket Hub**: Auth gate (5s timeout), subscribe with event replay, heartbeat (20s), fan-out to all clients
+- **Auth**: 6-digit pairing code (10min TTL), CSPRNG tokens (32 bytes), constant-time comparison, rate limiting (5 attempts/60s → 5min block)
+- **Tests**: 54 passing (ring buffer + policy engine with 20+ positive and 10+ negative dangerous command cases)
+
+### 🔲 Phase 2: PWA Client (Next)
+### 🔲 Phase 3: Wear OS App
+### 🔲 Phase 4: Polish & Submit
 
 ## Features
 
 | Feature | Status | Source |
 |---|---|---|
 | Permission interception | ✅ | Observed (ACP `session/request_permission`) |
+| Policy auto-approve/deny | ✅ | Rules engine with defaults |
 | Session status | ✅ | Observed + Inferred (see docs/status-inference.md) |
-| Policy engine (auto-approve/deny/escalate) | ✅ | — |
-| Event stream | ✅ | Observed (ACP `session/update`) |
+| Event stream with replay | ✅ | Ring buffer, monotonic seq, no gaps |
+| Pairing & auth | ✅ | 6-digit code, bearer tokens, rate limiting |
 | Mock mode | ✅ | For testing without Kiro credentials |
-| Watch approval | ✅ | Wear OS standalone |
+| Watch approval | 🔲 | Wear OS standalone |
 | Token/credit usage | ❌ | Not exposed by ACP (honest absence, not faked) |
 
 ## Mock Mode
@@ -61,6 +83,17 @@ When mock mode is active:
 - WebSocket `hello` carries `mode: "mock"`
 - PWA shows a persistent amber bar: **MOCK MODE — not a real Kiro session**
 - Watch app shows a mock badge
+
+## Policy Engine
+
+Rules live in `~/.aibou/policy.json`. Default behavior:
+- **Auto-allow**: read-only tools, writes inside project directory
+- **Escalate**: writes outside project, dangerous shell commands, secret file access
+- **Deny**: writes to `~/.aibou/` (no self-modification)
+- **Fail closed**: unmatched rules always escalate to human
+- **Deny wins**: if both allow and deny rules match, deny takes precedence
+
+Use `--paranoid` to escalate everything regardless of rules.
 
 ## Built with Kiro
 
@@ -78,10 +111,10 @@ aibou/
 ├── .kiro/              # Kiro specs, steering, hooks (committed)
 ├── packages/
 │   ├── protocol/       # AWP types + zod schemas
-│   ├── bridge/         # ACP host daemon
-│   ├── pwa/            # React PWA client
+│   ├── bridge/         # ACP host daemon (Phase 1 ✅)
+│   ├── pwa/            # React PWA client (Phase 2)
 │   └── mock-agent/     # Fake ACP agent for tests
-├── wear/               # Wear OS app (Kotlin)
+├── wear/               # Wear OS app (Phase 3)
 └── docs/               # Architecture, protocol, findings
 ```
 
