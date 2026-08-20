@@ -16,9 +16,14 @@ Thumbs.db
 
 # Wear OS build outputs
 wear/app/build/
-wear/.gradle/
 wear/build/
+wear/.gradle/
 wear/local.properties
+
+# Signing secrets — never commit
+wear/keystore.properties
+*.jks
+*.keystore
 
 # Local-only verification notes
 demo.md

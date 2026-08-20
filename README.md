@@ -200,9 +200,76 @@ node scripts/live-probe.mjs <code> "Run the shell command 'node --version'."
 
 Raw ACP frames are written to `~/.aibou/logs/acp-<date>.jsonl`.
 
-Current status: **4/4 packages typecheck, 151/151 unit tests, 67/67 module
-assertions, 20/20 PWA-flow assertions** — all verified against both the mock
-agent and real `kiro-cli` 2.18.1.
+Timing-dependent behaviour (approval timeout, heartbeat, disconnect-during-
+approval, session cap) has its own suite, which needs a shortened timeout:
+
+```bash
+node packages/bridge/dist/index.js --mock --approval-timeout 6000 --max-sessions 3
+node scripts/runtime-test.mjs <code> 6000
+```
+
+Current status:
+
+| Check | Result |
+|---|---|
+| Build | 4/4 packages |
+| Typecheck | 4/4 packages |
+| Unit tests | 189/189 |
+| Module + integration | 67/67 |
+| PWA frame contract | 20/20 |
+| Runtime timing | 16/16 |
+| Wear OS build | debug + signed release, 0 warnings |
+| Wear OS lint | 0 errors |
+
+All verified against both the mock agent and real `kiro-cli` 2.18.1.
+
+## Building the Wear OS app
+
+```bash
+cd wear
+./gradlew :app:assembleDebug          # installable debug APK
+./gradlew :app:assembleRelease        # release APK
+./gradlew :app:lintDebug              # 0 errors expected
+```
+
+Toolchain is pinned: Gradle 9.4.1, AGP 9.2.1, Kotlin 2.4.10, JDK 17,
+compileSdk 37, targetSdk 36, minSdk 30 (Wear OS 3+).
+
+Install to a device or emulator:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Emulator note:** the Bridge on your host is reachable at `10.0.2.2:8787` from
+inside the emulator. That value is pre-filled on the pairing screen but is fully
+editable, so a physical watch can point at your machine's LAN IP instead.
+
+Release signing is optional and driven by `wear/keystore.properties` (gitignored,
+see `keystore.properties.example`). Without it the release build still succeeds
+and produces an unsigned APK, so cloning the repo never requires local secrets.
+
+The token is encrypted with an AES-256-GCM key in the Android Keystore.
+`androidx.security:security-crypto` is deliberately unused — it is deprecated.
+
+## Configuration
+
+```
+--mock                     Use the bundled fake ACP agent (no Kiro credentials)
+--host <addr>              Bind address                 (default 127.0.0.1)
+--port <n>                 Bind port                    (default 8787)
+--paranoid                 Escalate every action, ignoring allow rules
+--trace                    Log all ACP frames to ~/.aibou/logs/
+--approval-timeout <ms>    Auto-deny after this long    (default 900000)
+--event-buffer <n>         Events retained per session  (default 500)
+--max-sessions <n>         Concurrent session cap       (default 4)
+--help                     Show usage
+
+AIBOU_KIRO_BIN             Path to the kiro-cli binary
+```
+
+Invalid numeric values are rejected with a warning and fall back to the default
+rather than starting in a broken state.
 
 ---
 

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "pnpm --filter @aibou/protocol build && pnpm --filter @aibou/pwa build && pnpm --filter @aibou/bridge build && pnpm --filter @aibou/mock-agent build",
     "dev": "pnpm --filter @aibou/bridge dev",
-    "demo": "pnpm --filter @aibou/protocol build && pnpm --filter @aibou/pwa build && pnpm --filter @aibou/bridge demo",
+    "demo": "pnpm --filter @aibou/protocol build && pnpm --filter @aibou/mock-agent build && pnpm --filter @aibou/pwa build && pnpm --filter @aibou/bridge demo",
     "start": "pnpm run build && pnpm --filter @aibou/bridge start",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",

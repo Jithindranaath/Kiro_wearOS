@@ -6,6 +6,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.*
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -32,9 +35,14 @@ class AibouClient(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS) // No timeout for WebSocket
+        .readTimeout(0, TimeUnit.MILLISECONDS) // No read timeout for WebSocket
+        .connectTimeout(10, TimeUnit.SECONDS)
         .pingInterval(25, TimeUnit.SECONDS)
         .build()
+
+    private companion object {
+        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    }
 
     /**
      * Connect to the Bridge WebSocket.
@@ -106,34 +114,48 @@ class AibouClient(
     }
 
     /**
-     * Pair with the Bridge using a 6-digit code.
+     * Exchange a 6-digit pairing code for a bearer token and persist it.
+     *
+     * @return null on success, or a short human-readable reason for the failure
+     *   so the pairing screen can tell the user what actually went wrong.
      */
-    suspend fun pair(bridgeUrl: String, code: String): Boolean {
+    suspend fun pair(bridgeUrl: String, code: String): String? {
         return withContext(Dispatchers.IO) {
             try {
-                val body = RequestBody.create(
-                    MediaType.parse("application/json"),
-                    """{"code":"$code"}"""
-                )
+                val payload = buildJsonObject { put("code", code) }.toString()
+                val body = payload.toRequestBody(JSON_MEDIA_TYPE)
                 val request = Request.Builder()
                     .url("$bridgeUrl/api/pair")
                     .post(body)
                     .build()
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val responseBody = response.body()?.string() ?: return@withContext false
-                    val jsonResponse = json.parseToJsonElement(responseBody).jsonObject
-                    val token = jsonResponse["token"]?.jsonPrimitive?.content
-                    if (token != null) {
-                        tokenStore.token = token
-                        tokenStore.bridgeUrl = bridgeUrl
-                        return@withContext true
+                client.newCall(request).execute().use { response ->
+                    // OkHttp 5: Response.body is non-null.
+                    val raw = response.body.string()
+
+                    if (!response.isSuccessful) {
+                        return@withContext when (response.code) {
+                            401 -> "Invalid or expired code"
+                            429 -> "Too many attempts, wait 5 min"
+                            else -> "Bridge error ${response.code}"
+                        }
                     }
+                    if (raw.isNullOrBlank()) return@withContext "Empty response from Bridge"
+
+                    val token = runCatching {
+                        json.parseToJsonElement(raw).jsonObject["token"]?.jsonPrimitive?.content
+                    }.getOrNull()
+
+                    if (token.isNullOrBlank()) return@withContext "No token in response"
+
+                    tokenStore.token = token
+                    tokenStore.bridgeUrl = bridgeUrl
+                    null
                 }
-                false
+            } catch (e: IOException) {
+                "Cannot reach $bridgeUrl"
             } catch (e: Exception) {
-                false
+                e.message?.take(40) ?: "Pairing failed"
             }
         }
     }

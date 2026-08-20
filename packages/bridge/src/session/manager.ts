@@ -29,16 +29,32 @@ interface SessionState {
   hadToolCallInSegment: boolean;
 }
 
-const MAX_SESSIONS = 4;
+export interface SessionManagerOptions {
+  /** Concurrent session cap (AC1.2.3). */
+  maxSessions?: number;
+  /** Events retained per session for replay (AC1.3.2). */
+  eventBuffer?: number;
+}
+
+const DEFAULT_MAX_SESSIONS = 4;
+const DEFAULT_EVENT_BUFFER = 500;
 
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, SessionState>();
+  private readonly maxSessions: number;
+  private readonly eventBuffer: number;
+
+  constructor(options: SessionManagerOptions = {}) {
+    super();
+    this.maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+    this.eventBuffer = options.eventBuffer ?? DEFAULT_EVENT_BUFFER;
+  }
 
   /**
    * Register a new session.
    */
   createSession(sessionId: string, cwd: string): SessionInfo {
-    if (this.sessions.size >= MAX_SESSIONS) {
+    if (this.sessions.size >= this.maxSessions) {
       throw new Error('AIBOU_SESSION_LIMIT');
     }
 
@@ -54,13 +70,23 @@ export class SessionManager extends EventEmitter {
 
     this.sessions.set(sessionId, {
       info,
-      buffer: new RingBuffer(500),
+      buffer: new RingBuffer(this.eventBuffer),
       lastAgentText: '',
       hadToolCallInSegment: false,
     });
 
     this.emit('session.state', info);
     return info;
+  }
+
+  /** True when no further sessions can be created (AC1.2.3). */
+  get atCapacity(): boolean {
+    return this.sessions.size >= this.maxSessions;
+  }
+
+  /** The configured concurrent session cap. */
+  get limit(): number {
+    return this.maxSessions;
   }
 
   /**

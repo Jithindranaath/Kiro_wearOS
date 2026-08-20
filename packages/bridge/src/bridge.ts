@@ -31,6 +31,12 @@ export interface BridgeOptions {
   port: number;
   paranoid: boolean;
   trace: boolean;
+  /** Auto-deny an unanswered approval after this many ms (AC2.1.5). */
+  approvalTimeoutMs: number;
+  /** Events retained per session for replay (AC1.3.2). */
+  eventBuffer: number;
+  /** Concurrent session cap (AC1.2.3). */
+  maxSessions: number;
 }
 
 /**
@@ -55,7 +61,8 @@ const DESTRUCTIVE_COMMAND_RE =
   /\brm\s+-[a-z]*[rf]|\bsudo\b|\bdd\s+if=|\bmkfs\b|\bformat\s+[a-z]:|\bdel\s+\/[sq]\b|\bshutdown\b|\breboot\b|>\s*\/dev\/|\bchmod\s+777\b|\bgit\s+push\s+(--force|-f)\b/i;
 
 export async function startBridge(options: BridgeOptions): Promise<void> {
-  const { mock, host, port, paranoid, trace } = options;
+  const { mock, host, port, paranoid, trace, approvalTimeoutMs, eventBuffer, maxSessions } =
+    options;
 
   // ─── Resolve kiro-cli binary ─────────────────────────────────────────────
 
@@ -85,10 +92,28 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   let agentArgs: string[];
 
   if (mock) {
-    // Use mock agent — spawn node with tsx loader
-    const mockPath = join(import.meta.dirname ?? __dirname, '../../mock-agent/src/index.ts');
-    agentBin = process.execPath; // current node binary
-    agentArgs = ['--import', 'tsx/esm', mockPath];
+    // Prefer the compiled mock agent: plain JS, so it needs no TS loader and
+    // works regardless of the current working directory. Fall back to the
+    // TypeScript source via tsx only when running from source in dev.
+    const here = join(fileURLToPath(import.meta.url), '..');
+    const builtMock = resolve(here, '../../mock-agent/dist/index.js');
+    const sourceMock = resolve(here, '../../mock-agent/src/index.ts');
+
+    agentBin = process.execPath; // the node binary currently running
+
+    if (existsSync(builtMock)) {
+      agentArgs = [builtMock];
+    } else if (existsSync(sourceMock)) {
+      agentArgs = ['--import', 'tsx/esm', sourceMock];
+    } else {
+      console.error(
+        `\n❌ Mock agent not found.\n` +
+          `   Looked for: ${builtMock}\n` +
+          `               ${sourceMock}\n` +
+          `   Run: pnpm --filter @aibou/mock-agent build\n`,
+      );
+      process.exit(ExitCode.AGENT_UNAVAILABLE);
+    }
   } else {
     agentBin = kiroBin;
     agentArgs = acpArgs;
@@ -96,10 +121,10 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   // ─── Initialize components ────────────────────────────────────────────────
 
-  const sessionManager = new SessionManager();
+  const sessionManager = new SessionManager({ maxSessions, eventBuffer });
   const toolCalls = new ToolCallRegistry();
-  const policyEngine = new PolicyEngine(paranoid);
-  const approvalManager = new ApprovalManager();
+  const policyEngine = new PolicyEngine({ paranoid });
+  const approvalManager = new ApprovalManager(approvalTimeoutMs);
   const authManager = new AuthManager();
   const wsHub = new WsHub(authManager);
 
@@ -136,14 +161,39 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     }
   }
 
+  /** True once the handshake has succeeded at least once. */
+  let everInitialized = false;
+
   acpClient.on('error', (err) => {
     console.error(`[bridge] ACP error: ${err.message}`);
+  });
+
+  // The binary could not be executed at all (e.g. ENOENT). Retrying will not
+  // help, so fail fast with the documented exit code instead of exiting 0.
+  acpClient.on('spawnFailed', (err: Error) => {
+    console.error(
+      `\n❌ Cannot start the Kiro ACP agent.\n` +
+        `   ${err.message}\n` +
+        `   Resolved binary: ${agentBin}\n` +
+        `   Set AIBOU_KIRO_BIN to the full path of kiro-cli, or run with --mock.\n`,
+    );
+    process.exit(ExitCode.AGENT_UNAVAILABLE);
   });
 
   acpClient.on('exit', (code, signal) => {
     console.warn(`[bridge] Agent exited (code: ${code}, signal: ${signal})`);
     sessionManager.disconnectAll();
     broadcastAllSessionStates();
+
+    // Never came up in the first place — respawning will not fix it.
+    if (!everInitialized) {
+      console.error(
+        `\n❌ The agent exited before completing the ACP handshake.\n` +
+          `   Resolved binary: ${agentBin}\n` +
+          `   Check that it is a working kiro-cli, or run with --mock.\n`,
+      );
+      process.exit(ExitCode.AGENT_UNAVAILABLE);
+    }
 
     if (respawnCount < MAX_RESPAWNS) {
       const delay = RESPAWN_DELAYS[respawnCount] ?? 4000;
@@ -422,6 +472,16 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       return;
     }
 
+    // Reject before spawning an agent session we would have to discard.
+    if (sessionManager.atCapacity) {
+      wsHub.sendToClient(client, {
+        v: 1, t: 'error', id: frame.id, code: 'AIBOU_SESSION_LIMIT',
+        message: `Session limit reached (${sessionManager.limit}). Close a session first.`,
+        retryable: false, ts: Date.now(),
+      });
+      return;
+    }
+
     try {
       const result = await methods.sessionNew(cwd);
       const info = sessionManager.createSession(result.sessionId, cwd);
@@ -608,11 +668,18 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // Initialize ACP session
   try {
     const initResult = await methods.initialize();
+    everInitialized = true;
     console.log(`✅ ACP agent initialized: ${initResult.agentInfo.name} v${initResult.agentInfo.version}`);
     console.log(`   Protocol: v${initResult.protocolVersion}`);
     console.log(`   Capabilities: loadSession=${initResult.agentCapabilities.loadSession}`);
   } catch (err) {
-    console.error(`❌ Failed to initialize ACP agent: ${err}`);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `\n❌ ACP handshake failed.\n` +
+        `   ${message}\n` +
+        `   Resolved binary: ${agentBin}\n` +
+        `   Set AIBOU_KIRO_BIN to the full path of kiro-cli, or run with --mock.\n`,
+    );
     process.exit(ExitCode.AGENT_UNAVAILABLE);
   }
 

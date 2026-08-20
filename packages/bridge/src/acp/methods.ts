@@ -183,7 +183,14 @@ export class AcpMethods {
     private clientVersion: string = '0.0.0',
   ) {}
 
-  async initialize(): Promise<InitializeResult> {
+  /**
+   * Handshake with the agent.
+   *
+   * Bounded by a timeout: a real kiro-cli replies in ~2s, so a much larger
+   * budget still fails fast if the binary is wrong or the agent is wedged,
+   * instead of leaving the Bridge waiting forever.
+   */
+  async initialize(timeoutMs = 30_000): Promise<InitializeResult> {
     const params: InitializeParams = {
       protocolVersion: 1,
       clientCapabilities: {
@@ -195,7 +202,7 @@ export class AcpMethods {
         version: this.clientVersion,
       },
     };
-    return (await this.client.request('initialize', params)) as InitializeResult;
+    return (await this.client.request('initialize', params, timeoutMs)) as InitializeResult;
   }
 
   async sessionNew(cwd: string): Promise<SessionNewResult> {

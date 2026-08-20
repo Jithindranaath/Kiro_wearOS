@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.material.*
 import dev.aibou.wear.data.AibouClient
 import kotlinx.coroutines.launch
@@ -72,12 +73,13 @@ fun PairScreen(
                     error = null
                     val baseUrl = "http://$host:$port"
                     scope.launch {
-                        val ok = client.pair(baseUrl, code)
+                        // pair() returns null on success, or a reason to show.
+                        val failure = client.pair(baseUrl, code)
                         loading = false
-                        if (ok) {
+                        if (failure == null) {
                             onPaired()
                         } else {
-                            error = "Pairing failed"
+                            error = failure
                             code = ""
                         }
                     }

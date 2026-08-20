@@ -116,28 +116,25 @@ export class AcpClient extends EventEmitter {
     // Handle process exit
     this.process.on('exit', (code, signal) => {
       this.alive = false;
-      // Reject all pending requests
-      for (const [id, pending] of this.pending) {
-        pending.reject(
-          new AibouError(
-            AibouErrorCode.AGENT_DOWN,
-            `Agent exited while waiting for response to ${pending.method} (id: ${id})`,
-          ),
-        );
-      }
-      this.pending.clear();
+      this.failAllPending(
+        `Agent exited (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
+      );
       this.emit('exit', code, signal);
     });
 
+    // A spawn failure (e.g. ENOENT) emits 'error' and may never emit 'exit'.
+    // Pending requests must still be rejected, otherwise callers await a
+    // promise that never settles and the process exits silently with code 0.
     this.process.on('error', (err) => {
       this.alive = false;
-      this.emit(
-        'error',
-        new AibouError(
-          AibouErrorCode.AGENT_DOWN,
-          `Failed to spawn ACP agent at "${kiroBin}": ${err.message}. Set AIBOU_KIRO_BIN to the correct path.`,
-        ),
+      const wrapped = new AibouError(
+        AibouErrorCode.AGENT_DOWN,
+        `Failed to spawn ACP agent at "${kiroBin}": ${err.message}. ` +
+          `Set AIBOU_KIRO_BIN to the correct path.`,
       );
+      this.failAllPending(wrapped.message);
+      this.emit('error', wrapped);
+      this.emit('spawnFailed', wrapped);
     });
 
     this.emit('ready');
@@ -145,8 +142,12 @@ export class AcpClient extends EventEmitter {
 
   /**
    * Send a JSON-RPC request and wait for the response.
+   *
+   * @param timeoutMs Reject if the agent does not reply in time. Omit (or pass
+   *   0) for calls that legitimately stay open for the whole turn, such as
+   *   `session/prompt`.
    */
-  async request(method: string, params?: unknown): Promise<unknown> {
+  async request(method: string, params?: unknown, timeoutMs = 0): Promise<unknown> {
     if (!this.alive || !this.process?.stdin) {
       throw new AibouError(AibouErrorCode.AGENT_DOWN, 'ACP agent is not running');
     }
@@ -160,9 +161,49 @@ export class AcpClient extends EventEmitter {
     };
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method, timestamp: Date.now() });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const settle = {
+        resolve: (value: unknown) => {
+          if (timer) clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (err: Error) => {
+          if (timer) clearTimeout(timer);
+          reject(err);
+        },
+        method,
+        timestamp: Date.now(),
+      };
+
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(
+            new AibouError(
+              AibouErrorCode.AGENT_DOWN,
+              `Agent did not respond to ${method} within ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      }
+
+      this.pending.set(id, settle);
       this.sendFrame(frame);
     });
+  }
+
+  /** Reject every in-flight request with the same cause. */
+  private failAllPending(reason: string): void {
+    for (const [id, pending] of this.pending) {
+      pending.reject(
+        new AibouError(
+          AibouErrorCode.AGENT_DOWN,
+          `${reason} while waiting for response to ${pending.method} (id: ${id})`,
+        ),
+      );
+    }
+    this.pending.clear();
   }
 
   /**
