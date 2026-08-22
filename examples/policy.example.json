@@ -1,0 +1,86 @@
+{
+  "//": [
+    "Example Aibou policy. Copy to ~/.aibou/policy.json to use it.",
+    "",
+    "Aibou ships sensible defaults, so this file is entirely optional -- with no",
+    "policy.json present the built-in rules apply. Run the Bridge to see which",
+    "policy is active; it prints e.g. 'Policy: built-in defaults (6 rules)'.",
+    "",
+    "Save as UTF-8. A UTF-8 BOM is tolerated, but anything unparseable makes the",
+    "Bridge fall back to paranoid mode (escalate everything) rather than fail open.",
+    "",
+    "Evaluation order, regardless of how rules are ordered here:",
+    "  1. any matching 'deny'     wins",
+    "  2. else any 'escalate'     wins",
+    "  3. else any 'allow'        wins",
+    "  4. nothing matched         -> escalate (fail closed)",
+    "",
+    "Conditions inside one 'when' are ANDed. Available conditions:",
+    "  tool            string or array; matches the agent's tool name",
+    "                  (_meta.kiro.toolName, e.g. 'shell') or the ACP tool kind",
+    "                  (e.g. 'execute', 'read', 'edit'). Supports * and prefix_*.",
+    "  pathIn          'cwd' | 'outside_cwd' -- relative to the session directory",
+    "  pathMatches     glob against the target path, e.g. '*.env'",
+    "  pathRegex       regex against the target path (unanchored, case-insensitive)",
+    "  commandMatches  regex against the command string (unanchored, case-insensitive)",
+    "",
+    "A rule with an empty 'when' is ignored, so a malformed rule cannot",
+    "accidentally allow or deny everything."
+  ],
+
+  "version": 1,
+  "rules": [
+    {
+      "id": "deny-aibou-self-modification",
+      "when": { "pathRegex": "[/\\\\]\\.aibou[/\\\\]" },
+      "then": "deny",
+      "reason": "The agent must not rewrite Aibou's own configuration."
+    },
+    {
+      "id": "deny-git-history-rewrite",
+      "when": { "commandMatches": "git\\s+(push\\s+--force|push\\s+-f\\b|reset\\s+--hard)" },
+      "then": "deny",
+      "reason": "Rewriting or force-pushing history is never allowed unattended."
+    },
+    {
+      "id": "escalate-secrets",
+      "when": {
+        "pathRegex": "\\.env(\\.|$)|\\.pem$|\\.key$|id_rsa|\\.ssh[/\\\\]|\\.aws[/\\\\]|credentials"
+      },
+      "then": "escalate",
+      "reason": "Touches a credential or secret file."
+    },
+    {
+      "id": "escalate-dangerous-commands",
+      "when": {
+        "commandMatches": "rm\\s+-[a-zA-Z]*[rf]|sudo\\s+|chmod\\s+777|\\bmkfs|dd\\s+if=|\\|\\s*(sh|bash)\\b|npm\\s+publish"
+      },
+      "then": "escalate",
+      "reason": "Potentially destructive shell command."
+    },
+    {
+      "id": "escalate-writes-outside-project",
+      "when": { "tool": ["fs_write", "str_replace", "fs_append", "write", "edit"], "pathIn": "outside_cwd" },
+      "then": "escalate",
+      "reason": "Writes outside the project directory."
+    },
+    {
+      "id": "allow-reads",
+      "when": { "tool": ["fs_read", "read_file", "grep_search", "file_search", "list_directory", "read", "search"] },
+      "then": "allow",
+      "reason": "Read-only operation."
+    },
+    {
+      "id": "allow-writes-in-project",
+      "when": { "tool": ["fs_write", "str_replace", "fs_append", "write", "edit"], "pathIn": "cwd" },
+      "then": "allow",
+      "reason": "Write inside the project directory."
+    },
+    {
+      "id": "allow-test-commands",
+      "when": { "commandMatches": "^(npm|pnpm|yarn)\\s+(test|run\\s+test)\\b|^(cargo|go)\\s+test\\b|^pytest\\b" },
+      "then": "allow",
+      "reason": "Running the test suite is routine; approve without interrupting."
+    }
+  ]
+}
