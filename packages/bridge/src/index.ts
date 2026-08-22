@@ -31,6 +31,7 @@ const { values: flags } = parseArgs({
     'approval-timeout': { type: 'string' },
     'event-buffer': { type: 'string' },
     'max-sessions': { type: 'string' },
+    'revoke-tokens': { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   },
   strict: false,
@@ -51,7 +52,11 @@ Options:
   --approval-timeout <ms>    Auto-deny after this long     (default ${DEFAULTS.approvalTimeoutMs})
   --event-buffer <n>         Events retained per session   (default ${DEFAULTS.eventBuffer})
   --max-sessions <n>         Concurrent session cap        (default ${DEFAULTS.maxSessions})
+  --revoke-tokens            Forget all paired devices, forcing them to re-pair
   --help                     Show this message
+
+Paired devices are remembered in ~/.aibou/config.json, so a phone or watch
+stays paired across Bridge restarts. Use --revoke-tokens to reset that.
 
 Environment:
   AIBOU_KIRO_BIN             Path to the kiro-cli binary
@@ -82,6 +87,7 @@ const maxSessions = intFlag(flags['max-sessions'], DEFAULTS.maxSessions, '--max-
 const mock = flags.mock === true;
 const paranoid = flags.paranoid === true;
 const trace = flags.trace === true;
+const revokeTokens = flags['revoke-tokens'] === true;
 
 // Warn on non-loopback binding
 if (host !== '127.0.0.1' && host !== 'localhost') {
@@ -101,6 +107,7 @@ startBridge({
   approvalTimeoutMs,
   eventBuffer,
   maxSessions,
+  revokeTokens,
 }).catch((err) => {
   console.error('Fatal:', err);
   process.exit(ExitCode.UNHANDLED);

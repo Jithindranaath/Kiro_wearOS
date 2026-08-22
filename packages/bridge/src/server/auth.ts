@@ -6,9 +6,16 @@
  * - Bearer token ≥32 bytes CSPRNG, hex-encoded
  * - Rate limit: 5 failed attempts per IP in 60s → block for 5 minutes
  * - Constant-time comparison
+ *
+ * Tokens are persisted to ~/.aibou/config.json (context.md §7) so a paired
+ * phone or watch survives a Bridge restart. Without this, every restart
+ * silently forces every client to re-pair.
  */
 
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 interface RateLimitEntry {
   attempts: number;
@@ -16,20 +23,116 @@ interface RateLimitEntry {
   blockedUntil: number;
 }
 
+/** On-disk shape of ~/.aibou/config.json. */
+interface StoredConfig {
+  version: 1;
+  tokens: string[];
+}
+
+export interface AuthManagerOptions {
+  /**
+   * Where to persist issued tokens. Pass null to disable persistence entirely
+   * (used by tests so they never touch the developer's home directory).
+   */
+  configPath?: string | null;
+}
+
+/** Cap stored tokens so pairing repeatedly cannot grow the file without bound. */
+const MAX_STORED_TOKENS = 20;
+
 export class AuthManager {
   private pairingCode: string;
   private codeExpiresAt: number;
   private tokens = new Set<string>();
   private rateLimits = new Map<string, RateLimitEntry>();
+  private readonly configPath: string | null;
 
   private readonly CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
   private readonly RATE_LIMIT_WINDOW_MS = 60_000; // 60 seconds
   private readonly RATE_LIMIT_MAX_ATTEMPTS = 5;
   private readonly RATE_LIMIT_BLOCK_MS = 5 * 60 * 1000; // 5 minutes
 
-  constructor() {
+  constructor(options: AuthManagerOptions = {}) {
+    this.configPath =
+      options.configPath === undefined
+        ? join(homedir(), '.aibou', 'config.json')
+        : options.configPath;
+
     this.pairingCode = this.generateCode();
     this.codeExpiresAt = Date.now() + this.CODE_TTL_MS;
+    this.loadTokens();
+  }
+
+  /** Number of tokens currently trusted, for startup reporting. */
+  get knownTokenCount(): number {
+    return this.tokens.size;
+  }
+
+  /** Forget every issued token, forcing all clients to pair again. */
+  revokeAllTokens(): void {
+    this.tokens.clear();
+    this.persistTokens();
+  }
+
+  /**
+   * Load previously issued tokens. A missing or unreadable file simply means
+   * no client is paired yet — never fatal.
+   */
+  private loadTokens(): void {
+    if (!this.configPath || !existsSync(this.configPath)) return;
+
+    try {
+      const raw = readFileSync(this.configPath, 'utf-8').replace(/^\uFEFF/, '');
+      const parsed: unknown = JSON.parse(raw);
+
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        !Array.isArray((parsed as StoredConfig).tokens)
+      ) {
+        console.warn(`[auth] ${this.configPath} is malformed; ignoring stored tokens.`);
+        return;
+      }
+
+      // Only accept values shaped like tokens we would have issued.
+      for (const t of (parsed as StoredConfig).tokens) {
+        if (typeof t === 'string' && /^[0-9a-f]{64}$/.test(t)) {
+          this.tokens.add(t);
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[auth] Could not read ${this.configPath}: ${message}. Ignoring stored tokens.`);
+    }
+  }
+
+  /** Write tokens back to disk with owner-only permissions where supported. */
+  private persistTokens(): void {
+    if (!this.configPath) return;
+
+    try {
+      mkdirSync(dirname(this.configPath), { recursive: true });
+
+      // Keep only the most recent tokens.
+      const tokens = [...this.tokens].slice(-MAX_STORED_TOKENS);
+      this.tokens = new Set(tokens);
+
+      const config: StoredConfig = { version: 1, tokens };
+      writeFileSync(this.configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+      // No-op on Windows, meaningful on POSIX.
+      try {
+        chmodSync(this.configPath, 0o600);
+      } catch {
+        /* filesystem does not support POSIX modes */
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[auth] Could not persist tokens to ${this.configPath}: ${message}. ` +
+          `Clients will need to re-pair after a restart.`,
+      );
+    }
   }
 
   /**
@@ -80,6 +183,8 @@ export class AuthManager {
     // Issue token
     const token = randomBytes(32).toString('hex'); // 64 hex chars = 32 bytes
     this.tokens.add(token);
+    // Persist so this client stays paired across Bridge restarts (context.md §7)
+    this.persistTokens();
     return token;
   }
 

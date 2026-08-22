@@ -37,6 +37,8 @@ export interface BridgeOptions {
   eventBuffer: number;
   /** Concurrent session cap (AC1.2.3). */
   maxSessions: number;
+  /** Forget all previously paired devices on startup. */
+  revokeTokens?: boolean;
 }
 
 /**
@@ -61,8 +63,17 @@ const DESTRUCTIVE_COMMAND_RE =
   /\brm\s+-[a-z]*[rf]|\bsudo\b|\bdd\s+if=|\bmkfs\b|\bformat\s+[a-z]:|\bdel\s+\/[sq]\b|\bshutdown\b|\breboot\b|>\s*\/dev\/|\bchmod\s+777\b|\bgit\s+push\s+(--force|-f)\b/i;
 
 export async function startBridge(options: BridgeOptions): Promise<void> {
-  const { mock, host, port, paranoid, trace, approvalTimeoutMs, eventBuffer, maxSessions } =
-    options;
+  const {
+    mock,
+    host,
+    port,
+    paranoid,
+    trace,
+    approvalTimeoutMs,
+    eventBuffer,
+    maxSessions,
+    revokeTokens = false,
+  } = options;
 
   // ─── Resolve kiro-cli binary ─────────────────────────────────────────────
 
@@ -126,6 +137,10 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   const policyEngine = new PolicyEngine({ paranoid });
   const approvalManager = new ApprovalManager(approvalTimeoutMs);
   const authManager = new AuthManager();
+  if (revokeTokens) {
+    authManager.revokeAllTokens();
+    console.log('🔓 All previously paired devices revoked; they must pair again.');
+  }
   const wsHub = new WsHub(authManager);
 
   // ─── Trace logging ────────────────────────────────────────────────────────
@@ -721,6 +736,11 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       '└──────────────────────────────────────────────────────┘',
       '',
       `🛡️  Policy: ${policyEngine.describe()}`,
+      `🔗 Paired devices: ${
+        authManager.knownTokenCount === 0
+          ? 'none yet — enter the code above on your phone or watch'
+          : `${authManager.knownTokenCount} remembered (they reconnect automatically)`
+      }`,
       `📱 Pairing URL: ${pairingUrl}`,
       '',
     ].join('\n'),
