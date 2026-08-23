@@ -227,8 +227,9 @@ if (boot.some((t) => t.includes('Pairing code') || t.includes('Bridge address'))
 }
 check('app launched and paired', true, JSON.stringify(boot));
 
+// Header reads "Connected · <account>", so match the prefix.
 const conn = await pollUi(
-  (xml) => screenText(xml).some((t) => t === 'Connected'),
+  (xml) => screenText(xml).some((t) => t.startsWith('Connected')),
   30_000,
   'Connected',
 );

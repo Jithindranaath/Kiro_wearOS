@@ -24,6 +24,7 @@ import { ApprovalManager } from './approval/manager.js';
 import { AuthManager } from './server/auth.js';
 import { WsHub, type ConnectedClient } from './server/ws.js';
 import { createHttpServer } from './server/http.js';
+import { AccountManager, type AccountInfo } from './account/manager.js';
 
 export interface BridgeOptions {
   mock: boolean;
@@ -57,6 +58,29 @@ function readBridgeVersion(): string {
 }
 
 const BRIDGE_VERSION = readBridgeVersion();
+
+/**
+ * One-line description of the Kiro account for the startup banner.
+ *
+ * Only ever renders values the CLI reported. An absent email is shown as such
+ * rather than filled in with a placeholder that looks like data.
+ */
+function describeAccount(info: AccountInfo): string {
+  switch (info.state) {
+    case 'authenticated': {
+      const who = info.email ?? info.accountType ?? 'signed in';
+      return info.provider ? `${who} (${info.provider})` : who;
+    }
+    case 'unauthenticated':
+      return 'not signed in — prompts will fail until you sign in';
+    case 'authenticating':
+      return 'sign-in in progress';
+    case 'mock':
+      return 'none — mock agent uses no account';
+    case 'unavailable':
+      return `unknown — ${info.reason ?? 'could not query kiro-cli'}`;
+  }
+}
 
 /** Commands that warrant the highest risk tier on the watch UI. */
 const DESTRUCTIVE_COMMAND_RE =
@@ -136,6 +160,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   const toolCalls = new ToolCallRegistry();
   const policyEngine = new PolicyEngine({ paranoid });
   const approvalManager = new ApprovalManager(approvalTimeoutMs);
+  // The Kiro identity the agent runs as. Separate from device pairing below.
+  const accountManager = new AccountManager({ kiroBin, mock });
   const authManager = new AuthManager();
   if (revokeTokens) {
     authManager.revokeAllTokens();
@@ -367,6 +393,83 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     }
   }
 
+  // ─── Approvals raised from outside the ACP agent ──────────────────────────
+
+  /**
+   * Raise an approval for a caller that is not the ACP agent, and resolve when a
+   * human answers it.
+   *
+   * The frame broadcast here is identical to an ACP-originated one, so the watch,
+   * the notification and the PWA all treat it the same — there is deliberately no
+   * second code path for "external" approvals to drift out of step.
+   *
+   * The policy engine is consulted first, exactly as for ACP requests, so an
+   * auto-deny rule cannot be bypassed by asking over HTTP instead.
+   */
+  async function raiseApproval(input: {
+    summary: string;
+    toolName: string;
+    toolInput?: unknown;
+    riskTier: 'low' | 'medium' | 'high';
+    sessionId: string;
+    timeoutMs?: number;
+  }): Promise<{ decision: 'allow' | 'deny'; resolution: string; approvalId: string }> {
+    const evaluation = policyEngine.evaluate({
+      toolName: input.toolName,
+      rawInput: input.toolInput,
+      cwd: sessionManager.getSession(input.sessionId)?.cwd ?? '',
+    });
+
+    if (evaluation.decision === 'allow' || evaluation.decision === 'deny') {
+      const approvalId = randomBytes(16).toString('hex');
+      wsHub.broadcast(null, {
+        v: 1,
+        t: 'permission.resolved',
+        approvalId,
+        decision: evaluation.decision,
+        resolution: 'policy',
+        ruleId: evaluation.ruleId,
+        ts: Date.now(),
+      });
+      return { decision: evaluation.decision, resolution: 'policy', approvalId };
+    }
+
+    const approval = approvalManager.createExternalApproval({
+      summary: input.summary,
+      toolName: input.toolName,
+      toolInput: input.toolInput,
+      riskTier: input.riskTier,
+      sessionId: input.sessionId,
+      timeoutMs: input.timeoutMs,
+    });
+
+    wsHub.broadcast(null, {
+      v: 1,
+      t: 'permission.request',
+      approvalId: approval.approvalId,
+      sessionId: approval.sessionId,
+      toolName: approval.toolName,
+      summary: approval.summary,
+      toolInput: approval.toolInput,
+      riskTier: approval.riskTier,
+      expiresAt: approval.expiresAt,
+      ts: Date.now(),
+    });
+
+    return new Promise((resolve) => {
+      const onResolved = (resolution: { approvalId: string; decision: 'allow' | 'deny'; resolution: string }): void => {
+        if (resolution.approvalId !== approval.approvalId) return;
+        approvalManager.off('resolved', onResolved);
+        resolve({
+          decision: resolution.decision,
+          resolution: resolution.resolution,
+          approvalId: approval.approvalId,
+        });
+      };
+      approvalManager.on('resolved', onResolved);
+    });
+  }
+
   // ─── Handle approval resolutions ──────────────────────────────────────────
 
   approvalManager.on('resolved', (resolution, sessionId) => {
@@ -389,6 +492,28 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   // ─── Handle client frames ─────────────────────────────────────────────────
 
+  /** Format the current Kiro account as an account.state frame. */
+  function makeAccountStateFrame(info: AccountInfo) {
+    return {
+      v: 1 as const,
+      t: 'account.state' as const,
+      state: info.state,
+      accountType: info.accountType,
+      provider: info.provider,
+      email: info.email,
+      verificationUri: info.verificationUri,
+      userCode: info.userCode,
+      reason: info.reason,
+      ts: Date.now(),
+    };
+  }
+
+  // Any change — sign-in, sign-out, a device code appearing — reaches every
+  // client, so a watch and the PWA never disagree about who is signed in.
+  accountManager.on('changed', (info: AccountInfo) => {
+    wsHub.broadcast(null, makeAccountStateFrame(info));
+  });
+
   wsHub.on('authenticated', (client: ConnectedClient, id?: string) => {
     // Send hello frame
     wsHub.sendToClient(client, {
@@ -398,9 +523,13 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       bridgeVersion: BRIDGE_VERSION,
       protocolVersion: 1,
       mode: mock ? 'mock' : 'live',
-      capabilities: ['sessions', 'permissions', 'events'],
+      capabilities: ['sessions', 'permissions', 'events', 'account'],
       ts: Date.now(),
     });
+
+    // Follow immediately with who the agent is running as, so a client never
+    // has to ask before it can render an account.
+    wsHub.sendToClient(client, makeAccountStateFrame(accountManager.snapshot));
   });
 
   wsHub.on('subscribe', (client: ConnectedClient, sessionId: string | undefined, since: number | undefined, id?: string) => {
@@ -465,7 +594,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
         handleSessionList(client, f as { id?: string });
         break;
       case 'prompt.send':
-        handlePromptSend(client, f as { id?: string; sessionId: string; text: string; source: string });
+        void handlePromptSend(client, f as { id?: string; sessionId: string; text: string; source: string });
         break;
       case 'permission.respond':
         handlePermissionRespond(client, f as { id?: string; approvalId: string; decision: 'allow' | 'deny' });
@@ -473,8 +602,93 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       case 'session.interrupt':
         handleSessionInterrupt(client, f as { id?: string; sessionId: string });
         break;
+      case 'session.close':
+        handleSessionClose(client, f as { id?: string; sessionId: string });
+        break;
+      case 'account.status':
+        void handleAccountStatus(client, f as { id?: string });
+        break;
+      case 'account.login':
+        void handleAccountLogin(
+          client,
+          f as {
+            id?: string;
+            license?: 'free' | 'pro';
+            social?: 'google' | 'github';
+            identityProvider?: string;
+            region?: string;
+          },
+        );
+        break;
+      case 'account.login.cancel':
+        handleAccountLoginCancel(client, f as { id?: string });
+        break;
+      case 'account.logout':
+        void handleAccountLogout(client, f as { id?: string });
+        break;
     }
   });
+
+  // ─── Account handlers ─────────────────────────────────────────────────────
+
+  async function handleAccountStatus(
+    client: ConnectedClient,
+    frame: { id?: string },
+  ): Promise<void> {
+    const info = await accountManager.refresh();
+    wsHub.sendToClient(client, {
+      v: 1, t: 'ack', id: frame.id, ok: true, result: info, ts: Date.now(),
+    });
+  }
+
+  async function handleAccountLogin(
+    client: ConnectedClient,
+    frame: {
+      id?: string;
+      license?: 'free' | 'pro';
+      social?: 'google' | 'github';
+      identityProvider?: string;
+      region?: string;
+    },
+  ): Promise<void> {
+    // Ack first: the device flow blocks until a human finishes in a browser,
+    // which can take minutes. Progress arrives as account.state frames.
+    wsHub.sendToClient(client, {
+      v: 1, t: 'ack', id: frame.id, ok: true,
+      result: accountManager.snapshot, ts: Date.now(),
+    });
+
+    try {
+      await accountManager.login({
+        license: frame.license,
+        social: frame.social,
+        identityProvider: frame.identityProvider,
+        region: frame.region,
+      });
+    } catch (err) {
+      wsHub.sendToClient(client, {
+        v: 1, t: 'error', code: 'AIBOU_INTERNAL',
+        message: `Sign-in failed: ${String(err)}`, retryable: true, ts: Date.now(),
+      });
+    }
+  }
+
+  function handleAccountLoginCancel(client: ConnectedClient, frame: { id?: string }): void {
+    const info = accountManager.cancelLogin();
+    wsHub.sendToClient(client, {
+      v: 1, t: 'ack', id: frame.id, ok: true, result: info, ts: Date.now(),
+    });
+  }
+
+  async function handleAccountLogout(
+    client: ConnectedClient,
+    frame: { id?: string },
+  ): Promise<void> {
+    const info = await accountManager.logout();
+    wsHub.sendToClient(client, {
+      v: 1, t: 'ack', id: frame.id, ok: true, result: info, ts: Date.now(),
+    });
+  }
 
   async function handleSessionCreate(client: ConnectedClient, frame: { id?: string; cwd: string }): Promise<void> {
     const { cwd } = frame;
@@ -487,11 +701,33 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       return;
     }
 
-    // Reject before spawning an agent session we would have to discard.
+    // A session that has errored or lost its agent can never be used again, so
+    // holding a slot for it only turns the cap into a dead end. Reclaim those
+    // before refusing, and say so rather than silently discarding state.
+    if (sessionManager.atCapacity) {
+      const dead = sessionManager
+        .listSessions()
+        .filter((s) => s.status === 'error' || s.status === 'disconnected');
+
+      for (const s of dead) {
+        approvalManager.cancelAllForSession(s.id);
+        sessionManager.removeSession(s.id);
+      }
+      if (dead.length > 0) {
+        console.log(
+          `[bridge] Reclaimed ${dead.length} unusable session(s) to make room: ` +
+            dead.map((s) => `${s.id.slice(0, 8)} (${s.status})`).join(', '),
+        );
+      }
+    }
+
+    // Still full: every slot holds a live session, so this is a real refusal.
     if (sessionManager.atCapacity) {
       wsHub.sendToClient(client, {
         v: 1, t: 'error', id: frame.id, code: 'AIBOU_SESSION_LIMIT',
-        message: `Session limit reached (${sessionManager.limit}). Close a session first.`,
+        message:
+          `Session limit reached (${sessionManager.limit}). ` +
+          `Close one with session.close, or from the session list in the web app.`,
         retryable: false, ts: Date.now(),
       });
       return;
@@ -516,7 +752,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, result: sessions, ts: Date.now() });
   }
 
-  function handlePromptSend(client: ConnectedClient, frame: { id?: string; sessionId: string; text: string; source: string }): void {
+  async function handlePromptSend(client: ConnectedClient, frame: { id?: string; sessionId: string; text: string; source: string }): Promise<void> {
     const { sessionId, text } = frame;
     const session = sessionManager.getSession(sessionId);
 
@@ -524,6 +760,18 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       wsHub.sendToClient(client, {
         v: 1, t: 'error', id: frame.id, code: 'AIBOU_SESSION_NOT_FOUND',
         message: `Session not found: ${sessionId}`, retryable: false, ts: Date.now(),
+      });
+      return;
+    }
+
+    // Fail here with something actionable rather than letting the agent fail
+    // opaquely several seconds later. Re-reads the CLI first, so a cached
+    // reading that has since gone stale never refuses work that would succeed.
+    if (!(await accountManager.verifyAuthenticated())) {
+      wsHub.sendToClient(client, {
+        v: 1, t: 'error', id: frame.id, code: 'AIBOU_UNAUTHENTICATED',
+        message: 'No Kiro account is signed in. Sign in from Aibou, or run: kiro-cli login',
+        retryable: true, ts: Date.now(),
       });
       return;
     }
@@ -579,10 +827,14 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       return;
     }
 
-    // Respond to the ACP agent
-    acpClient.respond(result.acpRequestId, {
-      outcome: { outcome: 'selected', optionId: result.optionId },
-    });
+    // Only ACP approvals have a held request to answer. An external one — a Kiro
+    // IDE hook, say — is waiting on its HTTP response, which the resolution event
+    // delivers; replying here would target a request id that does not exist.
+    if (result.origin === 'acp') {
+      acpClient.respond(result.acpRequestId, {
+        outcome: { outcome: 'selected', optionId: result.optionId },
+      });
+    }
 
     wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
   }
@@ -621,6 +873,39 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     if (info) {
       wsHub.broadcast(sessionId, makeSessionStateFrame(info));
     }
+  }
+
+  /**
+   * Close a session and free its slot.
+   *
+   * Cancels anything in flight first, so the agent is never left blocked on an
+   * approval for a session that no longer exists. The final `disconnected` state
+   * is broadcast before removal so clients can drop it from their lists.
+   */
+  function handleSessionClose(client: ConnectedClient, frame: { id?: string; sessionId: string }): void {
+    const { sessionId } = frame;
+
+    if (!sessionManager.getSession(sessionId)) {
+      wsHub.sendToClient(client, {
+        v: 1, t: 'error', id: frame.id, code: 'AIBOU_SESSION_NOT_FOUND',
+        message: `Session not found: ${sessionId}`, retryable: false, ts: Date.now(),
+      });
+      return;
+    }
+
+    approvalManager.cancelAllForSession(sessionId);
+    try {
+      methods.sessionCancel(sessionId);
+    } catch {
+      // The agent may already have dropped it; closing our side still matters.
+    }
+
+    sessionManager.setDisconnected(sessionId);
+    const info = sessionManager.getSession(sessionId);
+    if (info) wsHub.broadcast(sessionId, makeSessionStateFrame(info));
+
+    sessionManager.removeSession(sessionId);
+    wsHub.sendToClient(client, { v: 1, t: 'ack', id: frame.id, ok: true, ts: Date.now() });
   }
 
   function broadcastAllSessionStates(): void {
@@ -706,6 +991,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       auth: authManager,
       wsHub,
       version: BRIDGE_VERSION,
+      account: () => accountManager.snapshot,
+      raiseApproval,
     });
   } catch (err) {
     const msg = String(err);
@@ -734,6 +1021,15 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // Start heartbeat
   wsHub.startHeartbeat();
 
+  // Who is the agent running as? Ask before printing the banner so the operator
+  // learns about a missing sign-in here, rather than from a failing prompt later.
+  const account = await accountManager.refresh();
+
+  // Keep watching: signing in or out with the CLI happens outside Aibou and
+  // emits no event, so a one-time reading would go stale and every client would
+  // keep showing whatever was true at startup.
+  accountManager.startWatching();
+
   // Display startup info
   const mode = mock ? '🟡 MOCK MODE (not a real Kiro session)' : '🟢 LIVE';
   const pairingCode = authManager.getPairingCode();
@@ -750,6 +1046,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       `│  Pairing: ${pairingCode}`.padEnd(55) + '│',
       '└──────────────────────────────────────────────────────┘',
       '',
+      `👤 Kiro account: ${describeAccount(account)}`,
       `🛡️  Policy: ${policyEngine.describe()}`,
       `🔗 Paired devices: ${
         authManager.knownTokenCount === 0
@@ -760,6 +1057,16 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       '',
     ].join('\n'),
   );
+
+  if (account.state === 'unauthenticated') {
+    console.warn(
+      '⚠️  No Kiro account is signed in, so prompts will fail until one is.\n' +
+        '   Sign in from the Aibou web app, or run: kiro-cli login\n' +
+        '   The session then persists until you sign out from Aibou.\n',
+    );
+  } else if (account.state === 'unavailable') {
+    console.warn(`⚠️  Could not determine the Kiro account: ${account.reason ?? 'unknown'}\n`);
+  }
 
   if (policyEngine.policySource === 'invalid') {
     console.warn(
@@ -780,6 +1087,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   const shutdown = (): void => {
     console.log('\n🛑 Shutting down...');
     wsHub.stopHeartbeat();
+    accountManager.stopWatching();
+    accountManager.cancelLogin();
     acpClient.kill();
     process.exit(0);
   };

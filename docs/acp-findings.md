@@ -189,10 +189,98 @@ Namespaced `_kiro.dev/`, safely ignorable. Observed in traces:
 `_kiro.dev/metadata`, `_kiro.dev/session/update`. All fall through to
 `event.kind: "unknown"` with the payload preserved (AC1.3.5).
 
-### A8 — CLI hooks — not used
+### A8 — CLI hooks ✅ investigated — notification only, cannot approve
 
-Hooks remain a secondary enrichment channel. Nothing P0 depends on them, and the
-implemented feature set did not require them.
+Agent configs (`~/.kiro/agents/*.json`, `.kiro/agents/*.json`) accept a `hooks`
+map. Verified event names: `agentSpawn`, `userPromptSubmit`, `preToolUse`,
+`postToolUse`, `stop`. Entries take `{ matcher?, command, description? }`.
+
+This was investigated because it is the only candidate mechanism for surfacing
+approvals from a `kiro-cli chat` session that the Bridge did **not** spawn.
+
+**What works.** A `preToolUse` hook does fire in an ordinary chat session, and
+receives real detail on stdin:
+
+```json
+{
+  "hook_event_name": "preToolUse",
+  "cwd": "C:\\Users\\jpf\\Desktop\\kiro hack",
+  "tool_name": "execute_cmd",
+  "tool_input": { "command": "node --version", "summary": "Check the installed Node.js version" }
+}
+```
+
+`KIRO_SESSION_ID` is present in the hook's environment. The parent environment is
+**not** inherited, so a hook cannot be configured through env vars.
+
+**The CLI blocks while the hook runs.** A hook stalled for 9s produced a 14s
+total turn, and the CLI showed `0 of 1 hooks finished` throughout. So a hook can
+wait on something slow — a watch tap, for instance.
+
+**But a hook cannot deny a tool.** This contradicts the documentation, which
+describes `exit 2` as blocking. On kiro-cli 2.18.1:
+
+- Any non-zero exit is reported as `failed with exit code: 1` regardless of the
+  actual code, with stderr captured and shown.
+- The tool then **runs anyway**. Verified with `exit 1` and `exit 2` under
+  `--trust-all-tools`: `node --version` executed and returned `v24.12.0` both
+  times, after the hook was reported as failed.
+- What does block an untrusted tool is unrelated to hooks: in `--no-interactive`
+  mode the CLI rejects it with `non-interactive mode (no user to approve)`.
+
+**Consequence for Aibou.** Hooks can tell us that an external session is about to
+use a tool, and can stall it, but the decision still belongs to the terminal
+prompt. Rendering Approve/Deny buttons for such an event would show a control
+that does not control anything, which the honesty rule in context.md §6 forbids.
+
+Aibou therefore owns the sessions it gates. For a terminal experience whose
+approvals *are* answerable on the watch, use `aibou chat`, which drives the
+Bridge's own ACP agent under the same signed-in Kiro account.
+
+### A8b — Kiro **IDE** `preToolUse` hooks ⚠️ gate correctly, but stdin never ends
+
+A8 above concerns `kiro-cli chat`. Kiro IDE hooks (`.kiro/hooks/*.kiro.hook`) are
+a **different mechanism with a different contract**, and the difference cost a
+working feature. Both halves below were observed directly.
+
+**The gate works.** Unlike the CLI, an IDE `preToolUse` hook genuinely decides the
+call. The agent is shown the hook's stdout and exit code, and is instructed that a
+non-zero exit means the tool must not run. Verified: exit 0 → the command
+proceeded; a failed hook → the call was withheld. This is exactly the contract the
+approval design needed.
+
+**But stdin never reaches EOF.** The IDE gives the hook process a stdin that is not
+a TTY and is never closed. So the idiomatic read:
+
+```js
+for await (const chunk of process.stdin) data += chunk;   // never returns
+```
+
+hangs forever. It is not slow, it does not partially work — the loop simply never
+ends, so no code after it ever runs.
+
+Combined with `"timeout": 0` in the hook config (meaning *no limit*), this
+produced an unkillable hook: every shell command in the editor blocked
+indefinitely, no approval was ever raised, and the watch showed nothing. Observed
+as a 35-minute hang ending in `Command timed out with no output captured`,
+exit `-1`.
+
+**Consequences.**
+
+- Never read an IDE hook's stdin to EOF. Race it against a short deadline, or do
+  not read it at all.
+- Never set `"timeout": 0` on a hook that can block. The IDE's own timeout is the
+  only backstop against a wedged editor.
+- A hook that fails *open* still has to reach the code that fails open. This one's
+  fail-open path and its `AbortController` were both correct and both unreachable,
+  which is why the bug read as "the Bridge is down" rather than "the hook hung".
+
+The tool name and command are only available on that stdin, so without it a hook
+cannot say *what* it is about to run. Since a summary is the entire point of a
+watch approval, the hook was removed rather than shipped showing "some tool".
+Real-time approvals now come from the Bridge's own ACP session, where the detail
+is delivered by the agent and a deny genuinely blocks — see
+`scripts/watch-live.mjs` and `scripts/verify-watch-live.mjs`.
 
 ### A9 — Token / context usage ✅ **available**
 

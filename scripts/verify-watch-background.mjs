@@ -258,7 +258,8 @@ await sleep(5000);
 
 let connected = false;
 for (let i = 0; i < 20 && !connected; i++) {
-  connected = screenText(uiDump()).some((t) => t === 'Connected');
+  // Header reads "Connected · <account>", so match the prefix.
+  connected = screenText(uiDump()).some((t) => t.startsWith('Connected'));
   if (!connected) await sleep(1000);
 }
 check('app connected to the Bridge', connected);

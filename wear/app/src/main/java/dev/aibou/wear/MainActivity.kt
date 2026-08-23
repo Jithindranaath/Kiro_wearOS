@@ -19,6 +19,7 @@ import dev.aibou.wear.data.BridgeConnectionService
 import dev.aibou.wear.data.TokenStore
 import dev.aibou.wear.ui.*
 import dev.aibou.wear.ui.theme.AibouWearTheme
+import kotlinx.coroutines.flow.map
 
 /**
  * Android emulator host loopback. Only a pre-filled default — the user can
@@ -109,10 +110,22 @@ fun AibouApp(
     // approval arriving while the activity feed was open used to go unnoticed.
     // An approval is the one thing that must always interrupt.
     val pendingApprovalId = uiState.pendingApproval?.approvalId
-    LaunchedEffect(pendingApprovalId) {
+
+    // Track the live route, so the effect below re-evaluates when navigation
+    // settles. Keying on the approval id alone lost approvals that arrived while
+    // the previous approval screen was still dismissing: the route was briefly
+    // still "approval", the effect declined to navigate, and by the time the pop
+    // finished the id had not changed so nothing fired again. The developer saw
+    // nothing at all while the agent sat blocked.
+    val currentRoute by navController.currentBackStackEntryFlow
+        .map { it.destination.route }
+        .collectAsState(initial = null)
+
+    LaunchedEffect(pendingApprovalId, currentRoute) {
         if (pendingApprovalId != null &&
-            navController.currentDestination?.route != "approval" &&
-            navController.currentDestination?.route != "pair"
+            currentRoute != null &&
+            currentRoute != "approval" &&
+            currentRoute != "pair"
         ) {
             navController.navigate("approval")
         }
@@ -148,12 +161,23 @@ fun AibouApp(
                 },
                 onNavigateToActivity = {
                     navController.navigate("activity")
+                },
+                onNavigateToAccount = {
+                    navController.navigate("account")
                 }
             )
         }
 
         composable("activity") {
             ActivityScreen(uiState = uiState)
+        }
+
+        composable("account") {
+            AccountScreen(
+                account = uiState.account,
+                onSignOut = { client.signOutKiroAccount() },
+                onRefresh = { client.refreshAccount() }
+            )
         }
 
         composable("approval") {

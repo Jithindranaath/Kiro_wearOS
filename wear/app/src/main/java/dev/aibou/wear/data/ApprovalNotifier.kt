@@ -1,5 +1,6 @@
 package dev.aibou.wear.data
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -41,17 +43,17 @@ class ApprovalNotifier(private val context: Context) {
         manager.createNotificationChannel(channel)
     }
 
-    /** True when the OS will actually deliver what we post. */
-    private fun canPost(): Boolean {
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            "android.permission.POST_NOTIFICATIONS",
-        ) == PackageManager.PERMISSION_GRANTED
-        return granted && manager.areNotificationsEnabled()
-    }
-
     fun show(approval: PermissionRequest) {
-        if (!canPost()) return
+        // Checked inline rather than in a helper so the guard is verifiable at the
+        // call site. POST_NOTIFICATIONS only became a runtime permission in API 33;
+        // below that, posting needs no grant, and asking would report it denied.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        if (!manager.areNotificationsEnabled()) return
 
         val command = approval.toolInput
             ?.let { runCatching { it.toString() }.getOrNull() }
@@ -88,12 +90,22 @@ class ApprovalNotifier(private val context: Context) {
             )
             .build()
 
-        runCatching { manager.notify(NOTIFICATION_ID, notification) }
+        try {
+            manager.notify(NOTIFICATION_ID, notification)
+        } catch (_: SecurityException) {
+            // The grant can be revoked between the check above and here. Losing the
+            // notification is bad but survivable; crashing the app would mean the
+            // in-app approval screen is lost too.
+        }
     }
 
     /** Clear the notification once the approval is answered, by anyone. */
     fun clear() {
-        runCatching { manager.cancel(NOTIFICATION_ID) }
+        try {
+            manager.cancel(NOTIFICATION_ID)
+        } catch (_: SecurityException) {
+            // Nothing to do; a stale notification is preferable to a crash.
+        }
     }
 
     private fun riskLabel(riskTier: String): String = when (riskTier) {

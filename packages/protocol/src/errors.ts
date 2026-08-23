@@ -3,6 +3,8 @@
  */
 export const AibouErrorCode = {
   UNAUTHORIZED: 'AIBOU_UNAUTHORIZED',
+  /** No Kiro account is signed in, so the agent cannot do any work. */
+  UNAUTHENTICATED: 'AIBOU_UNAUTHENTICATED',
   BAD_CWD: 'AIBOU_BAD_CWD',
   SESSION_LIMIT: 'AIBOU_SESSION_LIMIT',
   SESSION_NOT_FOUND: 'AIBOU_SESSION_NOT_FOUND',

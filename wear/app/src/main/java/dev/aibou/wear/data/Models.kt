@@ -83,6 +83,39 @@ data class ActivityItem(
 }
 
 /**
+ * The Kiro account the agent runs as, exactly as the Bridge reported it.
+ *
+ * Separate from this watch's pairing token: signing out of Kiro leaves the watch
+ * paired, and unpairing the watch does not sign the account out.
+ */
+@Serializable
+data class AccountInfo(
+    /** authenticated | unauthenticated | authenticating | mock | unavailable */
+    val state: String = "unauthenticated",
+    val accountType: String? = null,
+    val provider: String? = null,
+    val email: String? = null,
+    val verificationUri: String? = null,
+    val userCode: String? = null,
+    val reason: String? = null
+) {
+    val isSignedIn: Boolean get() = state == "authenticated"
+
+    /**
+     * Short label for the status screen. Falls back through the fields the CLI
+     * actually provided and never invents an identity.
+     */
+    val label: String
+        get() = when (state) {
+            "authenticated" -> email ?: accountType ?: "Signed in"
+            "authenticating" -> "Signing in…"
+            "mock" -> "No account (mock)"
+            "unavailable" -> "Account unknown"
+            else -> "Not signed in"
+        }
+}
+
+/**
  * Combined UI state derived from WebSocket frames.
  */
 data class UiState(
@@ -92,6 +125,8 @@ data class UiState(
     val pendingApproval: PermissionRequest? = null,
     /** Newest last. Bounded — see AibouClient.MAX_ACTIVITY. */
     val activity: List<ActivityItem> = emptyList(),
+    /** Null until the Bridge reports one; never assume a signed-in account. */
+    val account: AccountInfo? = null,
     val error: String? = null
 ) {
     /**

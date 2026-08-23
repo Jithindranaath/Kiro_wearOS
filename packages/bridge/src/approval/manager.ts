@@ -16,8 +16,21 @@ import { randomBytes } from 'node:crypto';
 import type { RiskTier } from '@aibou/protocol';
 import type { PermissionRequestParams } from '../acp/methods.js';
 
+/**
+ * Where an approval came from.
+ *
+ * `acp` approvals hold a JSON-RPC request open and must be answered on that
+ * channel. `external` ones are raised by another process — a Kiro IDE
+ * `preToolUse` hook, for instance — which is waiting on an HTTP response
+ * instead. Answering the wrong channel would either leave an agent blocked
+ * forever or crash on a request id that does not exist.
+ */
+export type ApprovalOrigin = 'acp' | 'external';
+
 export interface PendingApproval {
   approvalId: string;
+  origin: ApprovalOrigin;
+  /** Only meaningful when origin is `acp`. */
   acpRequestId: number | string;
   sessionId: string;
   toolName: string;
@@ -95,6 +108,7 @@ export class ApprovalManager extends EventEmitter {
 
     const approval: PendingApproval = {
       approvalId,
+      origin: 'acp',
       acpRequestId,
       sessionId: params.sessionId,
       toolName: toolName ?? params.toolCall.kind ?? params.toolCall.title ?? 'unknown',
@@ -119,6 +133,57 @@ export class ApprovalManager extends EventEmitter {
   }
 
   /**
+   * Create an approval raised by something other than the ACP agent.
+   *
+   * Used by the Kiro IDE `preToolUse` hook, which is a separate short-lived
+   * process gating a tool call in the editor. The resulting approval is
+   * deliberately indistinguishable to clients — the watch renders and answers it
+   * exactly like any other — while resolution is delivered back over HTTP rather
+   * than to a held JSON-RPC request.
+   */
+  createExternalApproval(input: {
+    /** Watch-safe description, truncated here so callers cannot overflow it. */
+    summary: string;
+    toolName: string;
+    toolInput?: unknown;
+    riskTier: RiskTier;
+    /** Label used to group this with a session in client UIs. */
+    sessionId: string;
+    /** Override the default hold time; a hook usually cannot wait 15 minutes. */
+    timeoutMs?: number;
+  }): PendingApproval {
+    const approvalId = randomBytes(16).toString('hex');
+    const now = Date.now();
+    const holdMs = input.timeoutMs && input.timeoutMs > 0 ? input.timeoutMs : this.timeoutMs;
+
+    const approval: PendingApproval = {
+      approvalId,
+      origin: 'external',
+      // No JSON-RPC request exists; this is never used for an external approval.
+      acpRequestId: -1,
+      sessionId: input.sessionId,
+      toolName: input.toolName,
+      summary: truncate(collapseWhitespace(input.summary)),
+      toolInput: input.toolInput,
+      riskTier: input.riskTier,
+      // No agent-supplied options: the decision is carried by the HTTP response.
+      options: [],
+      createdAt: now,
+      expiresAt: now + holdMs,
+      resolved: false,
+    };
+
+    this.pending.set(approvalId, approval);
+
+    const timer = setTimeout(() => {
+      this.resolveApproval(approvalId, 'deny', 'timeout');
+    }, holdMs);
+    this.timers.set(approvalId, timer);
+
+    return approval;
+  }
+
+  /**
    * Resolve an approval with a decision.
    * Returns the ACP request ID so the caller can respond to the agent.
    * Returns null if already resolved (AC2.1.4).
@@ -129,7 +194,7 @@ export class ApprovalManager extends EventEmitter {
     resolution: 'user' | 'policy' | 'timeout',
     resolvedBy?: string,
     ruleId?: string,
-  ): { acpRequestId: number | string; optionId: string } | null {
+  ): { origin: ApprovalOrigin; acpRequestId: number | string; optionId: string } | null {
     const approval = this.pending.get(approvalId);
     if (!approval || approval.resolved) {
       return null; // Already resolved — AC2.1.4
@@ -178,7 +243,7 @@ export class ApprovalManager extends EventEmitter {
       this.pending.delete(approvalId);
     }, 5000);
 
-    return { acpRequestId: approval.acpRequestId, optionId };
+    return { origin: approval.origin, acpRequestId: approval.acpRequestId, optionId };
   }
 
   /**

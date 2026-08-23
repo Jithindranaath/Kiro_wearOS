@@ -31,9 +31,26 @@ export interface PendingApproval {
   expiresAt: number;
 }
 
+/**
+ * The Kiro account the agent runs as, exactly as the Bridge reported it.
+ *
+ * Distinct from this browser's pairing token: signing out of Kiro does not
+ * unpair the device, and unpairing does not sign the account out.
+ */
+export interface AccountInfo {
+  state: 'authenticated' | 'unauthenticated' | 'authenticating' | 'mock' | 'unavailable';
+  accountType?: string;
+  provider?: string;
+  email?: string;
+  verificationUri?: string;
+  userCode?: string;
+  reason?: string;
+}
+
 export interface AppState {
   connectionState: 'disconnected' | 'connecting' | 'authenticating' | 'connected';
   mode: 'live' | 'mock' | null;
+  account: AccountInfo | null;
   sessions: Map<string, SessionInfo>;
   events: SessionEvent[];
   pendingApprovals: Map<string, PendingApproval>;
@@ -43,7 +60,9 @@ export interface AppState {
 export type AppAction =
   | { type: 'SET_CONNECTION_STATE'; state: AppState['connectionState'] }
   | { type: 'SET_MODE'; mode: 'live' | 'mock' }
+  | { type: 'ACCOUNT_STATE'; account: AccountInfo }
   | { type: 'SESSION_STATE'; session: SessionInfo }
+  | { type: 'SESSION_CLOSED'; sessionId: string }
   | { type: 'EVENT'; event: SessionEvent }
   | { type: 'PERMISSION_REQUEST'; approval: PendingApproval }
   | { type: 'PERMISSION_RESOLVED'; approvalId: string }
@@ -54,6 +73,7 @@ export type AppAction =
 export const initialState: AppState = {
   connectionState: 'disconnected',
   mode: null,
+  account: null,
   sessions: new Map(),
   events: [],
   pendingApprovals: new Map(),
@@ -68,10 +88,27 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'SET_MODE':
       return { ...state, mode: action.mode };
 
+    case 'ACCOUNT_STATE':
+      return { ...state, account: action.account };
+
     case 'SESSION_STATE': {
       const sessions = new Map(state.sessions);
       sessions.set(action.session.id, action.session);
       return { ...state, sessions };
+    }
+
+    case 'SESSION_CLOSED': {
+      const sessions = new Map(state.sessions);
+      sessions.delete(action.sessionId);
+
+      // Drop its approvals too: a pending approval for a closed session can no
+      // longer be answered, and leaving the card up would invite a dead tap.
+      const pendingApprovals = new Map(state.pendingApprovals);
+      for (const [id, approval] of pendingApprovals) {
+        if (approval.sessionId === action.sessionId) pendingApprovals.delete(id);
+      }
+
+      return { ...state, sessions, pendingApprovals };
     }
 
     case 'EVENT': {

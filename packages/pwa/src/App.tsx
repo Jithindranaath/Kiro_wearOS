@@ -1,8 +1,9 @@
 import { useReducer, useCallback, useEffect, useRef, useState } from 'react';
 import { WsClient, type ConnectionState } from './lib/ws.js';
-import { appReducer, initialState, type PendingApproval, type SessionEvent, type SessionInfo } from './lib/store.js';
+import { appReducer, initialState, type AccountInfo, type PendingApproval, type SessionEvent, type SessionInfo } from './lib/store.js';
 import { PairScreen } from './components/PairScreen.js';
 import { MockBanner } from './components/MockBanner.js';
+import { AccountPanel } from './components/AccountPanel.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { SessionList } from './components/SessionList.js';
 import { EventStream } from './components/EventStream.js';
@@ -25,6 +26,8 @@ export function App() {
   const [paired, setPaired] = useState(() => {
     return !!(localStorage.getItem('aibou_token') && localStorage.getItem('aibou_bridge_url'));
   });
+  /** Why pairing was lost, so the pairing screen can explain itself. */
+  const [unpairedReason, setUnpairedReason] = useState<string | null>(null);
 
   const handleFrame = useCallback((frame: unknown) => {
     const f = frame as Record<string, unknown>;
@@ -84,6 +87,21 @@ export function App() {
         dispatch({ type: 'PERMISSION_RESOLVED', approvalId: f.approvalId as string });
         break;
 
+      case 'account.state': {
+        // Copy only the fields the Bridge sent; an absent email must stay absent.
+        const account: AccountInfo = {
+          state: f.state as AccountInfo['state'],
+          accountType: f.accountType as string | undefined,
+          provider: f.provider as string | undefined,
+          email: f.email as string | undefined,
+          verificationUri: f.verificationUri as string | undefined,
+          userCode: f.userCode as string | undefined,
+          reason: f.reason as string | undefined,
+        };
+        dispatch({ type: 'ACCOUNT_STATE', account });
+        break;
+      }
+
       case 'ack':
         // Session creation succeeded — close the dialog and select the new session
         if (f.id === CREATE_SESSION_FRAME_ID) {
@@ -98,6 +116,17 @@ export function App() {
         break;
 
       case 'error':
+        // A rejected token is terminal: the ws client stops reconnecting, so
+        // without this the page sits on "Disconnected" forever with no reason
+        // given and no way forward. Send the developer back to pairing instead.
+        if (f.code === 'AIBOU_UNAUTHORIZED') {
+          localStorage.removeItem('aibou_token');
+          localStorage.removeItem('aibou_bridge_url');
+          setUnpairedReason('This device is no longer paired with the Bridge. Pair again to continue.');
+          setPaired(false);
+          dispatch({ type: 'RESET' });
+          break;
+        }
         // Route session-creation errors to the dialog, everything else to the toast
         if (f.id === CREATE_SESSION_FRAME_ID) {
           setCreating(false);
@@ -138,7 +167,17 @@ export function App() {
   }, [paired, connectWs]);
 
   const handlePaired = (token: string, bridgeUrl: string) => {
+    setUnpairedReason(null);
     setPaired(true);
+    connectWs(token, bridgeUrl);
+  };
+
+  /** Reconnect now rather than waiting out the exponential backoff. */
+  const handleRetry = () => {
+    const token = localStorage.getItem('aibou_token');
+    const bridgeUrl = localStorage.getItem('aibou_bridge_url');
+    if (!token || !bridgeUrl) return;
+    wsRef.current?.disconnect();
     connectWs(token, bridgeUrl);
   };
 
@@ -182,6 +221,39 @@ export function App() {
     });
   };
 
+  const handleAccountLogin = (social?: 'google' | 'github') => {
+    wsRef.current?.send({
+      v: 1,
+      t: 'account.login',
+      // Social sign-in implies a Builder ID (free) licence; omitting `social`
+      // lets the CLI ask, which covers Identity Center setups.
+      ...(social ? { social, license: 'free' } : {}),
+      ts: Date.now(),
+    });
+  };
+
+  const handleAccountCancelLogin = () => {
+    wsRef.current?.send({ v: 1, t: 'account.login.cancel', ts: Date.now() });
+  };
+
+  const handleAccountLogout = () => {
+    // Signing out stops the agent working, so make that explicit rather than
+    // letting a stray click end the session.
+    const ok = window.confirm(
+      'Sign out of Kiro?\n\nThe agent cannot run until you sign in again. Your paired devices stay paired.',
+    );
+    if (!ok) return;
+    wsRef.current?.send({ v: 1, t: 'account.logout', ts: Date.now() });
+  };
+
+  const handleCloseSession = (sessionId: string) => {
+    wsRef.current?.send({ v: 1, t: 'session.close', sessionId, ts: Date.now() });
+    // Drop it locally too: the Bridge stops broadcasting for a removed session,
+    // so waiting for an update would leave a dead row in the list.
+    dispatch({ type: 'SESSION_CLOSED', sessionId });
+    if (activeSessionId === sessionId) setActiveSessionId(null);
+  };
+
   const handleCreateSession = (cwd: string) => {
     setCreating(true);
     setCreateError(null);
@@ -196,7 +268,7 @@ export function App() {
 
   // Show pairing screen if not connected
   if (!paired) {
-    return <PairScreen onPaired={handlePaired} />;
+    return <PairScreen onPaired={handlePaired} reason={unpairedReason} />;
   }
 
   const activeSession = activeSessionId ? state.sessions.get(activeSessionId) : undefined;
@@ -210,7 +282,7 @@ export function App() {
       <header className="border-b border-gray-700 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-bold">⛩️ Aibou</h1>
-          <ConnectionStatus state={state.connectionState} />
+          <ConnectionStatus state={state.connectionState} onRetry={handleRetry} />
         </div>
         <button
           onClick={handleUnpair}
@@ -241,11 +313,23 @@ export function App() {
             sessions={state.sessions}
             activeSessionId={activeSessionId}
             onSelect={setActiveSessionId}
+            onClose={handleCloseSession}
           />
         </aside>
 
         {/* Main content */}
         <main className="flex-1 flex flex-col overflow-hidden">
+          {/* Kiro account — who the agent runs as */}
+          <div className="border-b border-gray-700 p-3">
+            <AccountPanel
+              account={state.account}
+              connected={state.connectionState === 'connected'}
+              onLogin={handleAccountLogin}
+              onCancelLogin={handleAccountCancelLogin}
+              onLogout={handleAccountLogout}
+            />
+          </div>
+
           {/* Pending approvals */}
           {pendingApprovals.length > 0 && (
             <div className="border-b border-gray-700 p-3 space-y-3 max-h-80 overflow-y-auto">

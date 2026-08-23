@@ -6,7 +6,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "aibou": "dist/index.js"
+    "aibou": "dist/index.js",
+    "aibou-chat": "dist/chat/cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -14,6 +15,7 @@
     "demo": "tsx src/index.ts --mock",
     "start": "node dist/index.js",
     "live": "tsx src/index.ts",
+    "chat": "node dist/chat/cli.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "echo ok"

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D to 3D Transformer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>2D → 3D Transformer</h1>
+            <p class="subtitle">Upload an image and transform it into 3D space</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Controls Panel -->
+            <aside class="controls-panel">
+                <section class="control-group">
+                    <h2>Image</h2>
+                    <label class="upload-btn" for="image-upload">
+                        <span>📁 Choose Image</span>
+                        <input type="file" id="image-upload" accept="image/*">
+                    </label>
+                    <div id="file-name" class="file-name">No file selected</div>
+                </section>
+
+                <section class="control-group">
+                    <h2>Transform Mode</h2>
+                    <div class="mode-buttons">
+                        <button class="mode-btn active" data-mode="plane">Flat Plane</button>
+                        <button class="mode-btn" data-mode="box">Box Map</button>
+                        <button class="mode-btn" data-mode="cylinder">Cylinder</button>
+                        <button class="mode-btn" data-mode="sphere">Sphere</button>
+                        <button class="mode-btn" data-mode="wave">Wave</button>
+                        <button class="mode-btn" data-mode="terrain">Terrain</button>
+                    </div>
+                </section>
+
+                <section class="control-group">
+                    <h2>Adjustments</h2>
+                    <div class="slider-control">
+                        <label for="depth-slider">Depth / Extrusion</label>
+                        <input type="range" id="depth-slider" min="0" max="100" value="30">
+                        <span class="slider-value" id="depth-value">30</span>
+                    </div>
+                    <div class="slider-control">
+                        <label for="segments-slider">Segments</label>
+                        <input type="range" id="segments-slider" min="4" max="128" value="32">
+                        <span class="slider-value" id="segments-value">32</span>
+                    </div>
+                    <div class="slider-control">
+                        <label for="amplitude-slider">Wave Amplitude</label>
+                        <input type="range" id="amplitude-slider" min="0" max="100" value="20">
+                        <span class="slider-value" id="amplitude-value">20</span>
+                    </div>
+                </section>
+
+                <section class="control-group">
+                    <h2>Appearance</h2>
+                    <div class="checkbox-control">
+                        <input type="checkbox" id="wireframe-toggle">
+                        <label for="wireframe-toggle">Show Wireframe</label>
+                    </div>
+                    <div class="checkbox-control">
+                        <input type="checkbox" id="autorotate-toggle" checked>
+                        <label for="autorotate-toggle">Auto Rotate</label>
+                    </div>
+                    <div class="slider-control">
+                        <label for="light-slider">Light Intensity</label>
+                        <input type="range" id="light-slider" min="0" max="200" value="100">
+                        <span class="slider-value" id="light-value">100</span>
+                    </div>
+                </section>
+
+                <section class="control-group">
+                    <h2>Background</h2>
+                    <input type="color" id="bg-color" value="#1a1a2e">
+                    <label for="bg-color">Scene Background</label>
+                </section>
+            </aside>
+
+            <!-- 3D Viewport -->
+            <main class="viewport-container">
+                <div id="viewport">
+                    <div class="placeholder" id="placeholder">
+                        <p>🖼️ Upload an image to begin</p>
+                        <p class="hint">Drag & drop also supported</p>
+                    </div>
+                </div>
+                <div class="viewport-info">
+                    <span>🖱️ Left-drag: rotate | Scroll: zoom | Right-drag: pan</span>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

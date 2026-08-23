@@ -122,6 +122,38 @@ class AibouClient(
         }
     }
 
+    /** Ask the Bridge to re-read the Kiro account from the CLI. */
+    fun refreshAccount() {
+        val frame = buildJsonObject {
+            put("v", 1)
+            put("t", "account.status")
+            put("ts", System.currentTimeMillis())
+        }
+        if (!trySend(frame.toString())) {
+            // Not worth queueing: a fresh account.state arrives on reconnect anyway.
+            connect()
+        }
+    }
+
+    /**
+     * Sign the Kiro account out.
+     *
+     * Ends the agent's ability to work until someone signs in again, and is the
+     * only thing that does — Kiro persists credentials, so restarts do not. The
+     * watch stays paired.
+     */
+    fun signOutKiroAccount() {
+        val frame = buildJsonObject {
+            put("v", 1)
+            put("t", "account.logout")
+            put("ts", System.currentTimeMillis())
+        }
+        if (!trySend(frame.toString())) {
+            synchronized(pendingSends) { pendingSends.add(frame.toString()) }
+            connect()
+        }
+    }
+
     /**
      * Send an interrupt command for the current session.
      */
@@ -308,6 +340,23 @@ class AibouClient(
                     val seq = frame["seq"]?.jsonPrimitive?.long ?: 0
                     if (seq > lastSeq) lastSeq = seq
                     appendActivity(seq, frame)
+                }
+
+                "account.state" -> {
+                    fun field(key: String): String? =
+                        frame[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+
+                    _state.value = _state.value.copy(
+                        account = AccountInfo(
+                            state = field("state") ?: "unauthenticated",
+                            accountType = field("accountType"),
+                            provider = field("provider"),
+                            email = field("email"),
+                            verificationUri = field("verificationUri"),
+                            userCode = field("userCode"),
+                            reason = field("reason"),
+                        )
+                    )
                 }
 
                 "heartbeat" -> {

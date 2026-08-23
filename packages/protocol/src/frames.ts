@@ -59,10 +59,61 @@ export const SessionInterruptFrame = BaseFrame.extend({
 });
 export type SessionInterruptFrame = z.infer<typeof SessionInterruptFrame>;
 
+/**
+ * Close a session and free its slot.
+ *
+ * Without this the concurrent-session cap is a dead end: the limit error tells
+ * the developer to close a session, and nothing could.
+ */
+export const SessionCloseFrame = BaseFrame.extend({
+  t: z.literal('session.close'),
+  sessionId: z.string(),
+});
+export type SessionCloseFrame = z.infer<typeof SessionCloseFrame>;
+
 export const PongFrame = BaseFrame.extend({
   t: z.literal('pong'),
 });
 export type PongFrame = z.infer<typeof PongFrame>;
+
+/** Ask for the current Kiro account, as reported by `kiro-cli whoami`. */
+export const AccountStatusFrame = BaseFrame.extend({
+  t: z.literal('account.status'),
+});
+export type AccountStatusFrame = z.infer<typeof AccountStatusFrame>;
+
+/**
+ * Begin a Kiro sign-in. The Bridge runs the CLI's OAuth device flow and reports
+ * the verification URL and user code back as `account.state` frames, so the
+ * developer can complete it in any browser.
+ */
+export const AccountLoginFrame = BaseFrame.extend({
+  t: z.literal('account.login'),
+  license: z.enum(['free', 'pro']).optional(),
+  social: z.enum(['google', 'github']).optional(),
+  identityProvider: z.string().optional(),
+  region: z.string().optional(),
+});
+export type AccountLoginFrame = z.infer<typeof AccountLoginFrame>;
+
+/** Abandon an in-flight sign-in without signing the account out. */
+export const AccountLoginCancelFrame = BaseFrame.extend({
+  t: z.literal('account.login.cancel'),
+});
+export type AccountLoginCancelFrame = z.infer<typeof AccountLoginCancelFrame>;
+
+/**
+ * Sign the Kiro account out.
+ *
+ * This is the only thing that ends the session: Kiro persists credentials on
+ * disk, so the account stays signed in across Bridge and watch restarts until
+ * this is sent. It does not unpair the device — the Aibou pairing token and the
+ * Kiro account are separate identities.
+ */
+export const AccountLogoutFrame = BaseFrame.extend({
+  t: z.literal('account.logout'),
+});
+export type AccountLogoutFrame = z.infer<typeof AccountLogoutFrame>;
 
 // Union of all client frames
 export const ClientFrame = z.discriminatedUnion('t', [
@@ -73,7 +124,12 @@ export const ClientFrame = z.discriminatedUnion('t', [
   PromptSendFrame,
   PermissionRespondFrame,
   SessionInterruptFrame,
+  SessionCloseFrame,
   PongFrame,
+  AccountStatusFrame,
+  AccountLoginFrame,
+  AccountLoginCancelFrame,
+  AccountLogoutFrame,
 ]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 
@@ -155,6 +211,40 @@ export const HeartbeatFrame = BaseFrame.extend({
 });
 export type HeartbeatFrame = z.infer<typeof HeartbeatFrame>;
 
+/**
+ * Which Kiro account the agent is running as.
+ *
+ * `authenticated` / `unauthenticated` come straight from `kiro-cli whoami`;
+ * `email` and `provider` are only ever the CLI's own values and are absent when
+ * it reports none. `mock` means the bundled fake agent is in use and no real
+ * account is involved at all — never dress that up as a signed-in user.
+ */
+export const AccountState = z.enum([
+  'authenticated',
+  'unauthenticated',
+  'authenticating',
+  'mock',
+  'unavailable',
+]);
+export type AccountState = z.infer<typeof AccountState>;
+
+export const AccountStateFrame = BaseFrame.extend({
+  t: z.literal('account.state'),
+  state: AccountState,
+  /** e.g. "Social", "Pro". Present only when the CLI reported it. */
+  accountType: z.string().optional(),
+  /** e.g. "Google", "GitHub". Present only when the CLI reported it. */
+  provider: z.string().optional(),
+  email: z.string().optional(),
+  /** Device-flow verification URL, while state is `authenticating`. */
+  verificationUri: z.string().optional(),
+  /** Device-flow user code, while state is `authenticating`. */
+  userCode: z.string().optional(),
+  /** Why the account could not be determined, when state is `unavailable`. */
+  reason: z.string().optional(),
+});
+export type AccountStateFrame = z.infer<typeof AccountStateFrame>;
+
 // Union of all server frames
 export const ServerFrame = z.discriminatedUnion('t', [
   HelloFrame,
@@ -164,5 +254,6 @@ export const ServerFrame = z.discriminatedUnion('t', [
   PermissionRequestFrame,
   PermissionResolvedFrame,
   HeartbeatFrame,
+  AccountStateFrame,
 ]);
 export type ServerFrame = z.infer<typeof ServerFrame>;

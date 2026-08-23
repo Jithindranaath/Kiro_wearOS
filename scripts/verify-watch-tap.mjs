@@ -263,8 +263,10 @@ check(
   'live mode confirmed from the device UI',
 );
 
+// The status header combines connection state and account into one line, e.g.
+// "Connected · someone@example.com", so match a prefix rather than the whole cell.
 const { hit: connected } = await pollUi(
-  (xml) => screenText(xml).some((t) => t === 'Connected'),
+  (xml) => screenText(xml).some((t) => t.startsWith('Connected')),
   30_000,
   'the watch to report Connected',
 );
@@ -495,7 +497,7 @@ check('turn ended idle', Boolean(idle), idle ? `statusSource: ${idle.statusSourc
 const finalText = screenText(uiDump());
 check(
   'watch returned to the status screen',
-  finalText.some((t) => t === 'Connected'),
+  finalText.some((t) => t.startsWith('Connected')),
   JSON.stringify(finalText),
 );
 

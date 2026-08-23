@@ -20,10 +20,24 @@ export interface HttpServerOptions {
   wsHub: WsHub;
   version: string;
   pwaPath?: string;
+  /** Current Kiro account, for /api/account. Omit to disable the route. */
+  account?: () => unknown;
+  /**
+   * Raise an approval on behalf of an external caller and resolve once answered.
+   * Omit to disable /api/approval.
+   */
+  raiseApproval?: (input: {
+    summary: string;
+    toolName: string;
+    toolInput?: unknown;
+    riskTier: 'low' | 'medium' | 'high';
+    sessionId: string;
+    timeoutMs?: number;
+  }) => Promise<{ decision: 'allow' | 'deny'; resolution: string; approvalId: string }>;
 }
 
 export async function createHttpServer(options: HttpServerOptions): Promise<FastifyInstance> {
-  const { host, port, auth, wsHub, version, pwaPath } = options;
+  const { host, port, auth, wsHub, version, pwaPath, account, raiseApproval } = options;
 
   const app = Fastify({
     logger: false,
@@ -71,6 +85,64 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Fast
       clients: wsHub.clientCount,
     });
   });
+
+  /**
+   * Which Kiro account the agent runs as.
+   *
+   * Read-only and unauthenticated, like /api/health, and it exposes no
+   * credentials — only the state and whatever identity the CLI itself prints.
+   * Sign-in and sign-out are deliberately not here: those go over the
+   * authenticated WebSocket, so a paired device is required to change anything.
+   */
+  if (account) {
+    app.get('/api/account', async (_request, reply) => reply.send(account()));
+  }
+
+  /**
+   * Raise an approval from outside the ACP agent and wait for a human answer.
+   *
+   * This is what lets an editor gate itself: a Kiro IDE `preToolUse` hook posts
+   * the tool it is about to run, this holds the request open while the watch
+   * shows it, and the response carries the decision back so the hook can allow or
+   * block the call.
+   *
+   * Requires a bearer token — anything that can raise an approval can also
+   * interrupt the developer, so it is not open to unauthenticated callers.
+   */
+  if (raiseApproval) {
+    app.post('/api/approval', async (request, reply) => {
+      const header = request.headers.authorization ?? '';
+      const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+      if (!auth.validateToken(token)) {
+        return reply.status(401).send({ error: 'Invalid token' });
+      }
+
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const summary = typeof body.summary === 'string' ? body.summary.trim() : '';
+      if (summary === '') {
+        return reply.status(400).send({ error: 'summary is required' });
+      }
+
+      const riskTier =
+        body.riskTier === 'low' || body.riskTier === 'medium' || body.riskTier === 'high'
+          ? body.riskTier
+          : 'medium';
+
+      try {
+        const outcome = await raiseApproval({
+          summary,
+          toolName: typeof body.toolName === 'string' ? body.toolName : 'external',
+          toolInput: body.toolInput,
+          riskTier,
+          sessionId: typeof body.sessionId === 'string' ? body.sessionId : 'external',
+          timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
+        });
+        return reply.send(outcome);
+      } catch (err) {
+        return reply.status(500).send({ error: String(err) });
+      }
+    });
+  }
 
   // ─── Static PWA serving ────────────────────────────────────────────────────
 

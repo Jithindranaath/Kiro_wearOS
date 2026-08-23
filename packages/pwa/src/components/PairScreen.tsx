@@ -2,10 +2,17 @@ import { useState } from 'react';
 import { pairWithBridge } from '../lib/api.js';
 
 interface PairScreenProps {
+  /**
+   * Why the developer is back here, when they had already paired.
+   *
+   * Landing on a pairing form with no explanation reads like the app forgot
+   * something at random; a rejected token deserves to say so.
+   */
+  reason?: string | null;
   onPaired: (token: string, bridgeUrl: string) => void;
 }
 
-export function PairScreen({ onPaired }: PairScreenProps) {
+export function PairScreen({ onPaired, reason }: PairScreenProps) {
   const [code, setCode] = useState('');
   const [bridgeUrl, setBridgeUrl] = useState(() => {
     // Default to current origin (works when PWA is served from Bridge)
@@ -83,6 +90,12 @@ export function PairScreen({ onPaired }: PairScreenProps) {
               autoFocus
             />
           </div>
+
+          {reason && !error && (
+            <div className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 text-amber-200 text-sm">
+              {reason}
+            </div>
+          )}
 
           {error && (
             <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 text-red-300 text-sm">

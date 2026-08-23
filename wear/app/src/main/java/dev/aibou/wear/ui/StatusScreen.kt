@@ -1,5 +1,6 @@
 package dev.aibou.wear.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,7 +23,8 @@ import kotlinx.coroutines.delay
 fun StatusScreen(
     uiState: UiState,
     onNavigateToApproval: () -> Unit,
-    onNavigateToActivity: () -> Unit = {}
+    onNavigateToActivity: () -> Unit = {},
+    onNavigateToAccount: () -> Unit = {}
 ) {
     val session = uiState.session
     val connectionState = uiState.connectionState
@@ -61,7 +63,36 @@ fun StatusScreen(
             }
         }
 
-        // Connection state
+        // A missing Kiro sign-in stops all work, so it outranks everything else
+        // on the screen. Connection state is meaningless if the agent cannot act.
+        val account = uiState.account
+        if (account != null && (account.state == "unauthenticated" || account.state == "unavailable")) {
+            item {
+                Chip(
+                    onClick = onNavigateToAccount,
+                    label = {
+                        Text(
+                            text = if (account.state == "unauthenticated") {
+                                "Kiro not signed in"
+                            } else {
+                                "Kiro account unknown"
+                            },
+                            style = MaterialTheme.typography.caption2,
+                        )
+                    },
+                    colors = ChipDefaults.chipColors(backgroundColor = Color(0xFFB45309)),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        // Connection state, with the signed-in account directly beneath it.
+        //
+        // Both live in one list item on purpose. ScalingLazyColumn auto-centres
+        // item index 1, so adding a separate item for the account shifted the
+        // whole list and dropped the connection row out of the viewport
+        // entirely. Keeping them together means the header cannot be split, and
+        // both stay visible without scrolling on a 454px screen.
         item {
             val (statusColor, statusLabel) = when (connectionState) {
                 ConnectionState.CONNECTED -> Color(0xFF10B981) to "Connected"
@@ -73,7 +104,9 @@ fun StatusScreen(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToAccount() }
             ) {
                 Box(
                     modifier = Modifier
@@ -86,14 +119,24 @@ fun StatusScreen(
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = statusLabel,
-                    style = MaterialTheme.typography.caption2,
-                    color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f)
+                    // One text node carrying both facts. Sibling composables here
+                    // were dropped from the viewport by the scaling list's
+                    // auto-centering, and a status header that can lose half of
+                    // itself depending on item count is not worth the elegance.
+                    text = if (account != null && account.isSignedIn) {
+                        "$statusLabel · ${account.label}"
+                    } else {
+                        statusLabel
+                    },
+                    style = MaterialTheme.typography.caption3,
+                    color = MaterialTheme.colors.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    maxLines = 2
                 )
             }
         }
 
-        item { Spacer(modifier = Modifier.height(12.dp)) }
+        item { Spacer(modifier = Modifier.height(10.dp)) }
 
         // Session info
         if (session != null) {
@@ -216,6 +259,7 @@ fun StatusScreen(
                 )
             }
         }
+
     }
 }
 

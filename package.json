@@ -15,7 +15,15 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run test"
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
+    "chat": "node packages/bridge/dist/chat/cli.js",
+    "approve": "node scripts/trigger-approval.mjs \"Run the shell command 'node --version' and tell me what it prints.\"",
+    "watch:live": "node scripts/watch-live.mjs",
+    "verify:watch": "node scripts/verify-watch-live.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "verify": "node scripts/verify-all.mjs",
+    "verify:quick": "node scripts/verify-all.mjs --quick",
+    "verify:node": "node scripts/verify-all.mjs --skip-device"
   },
   "keywords": [
     "kiro",
