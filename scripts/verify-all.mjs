@@ -51,6 +51,9 @@ function resolveAdb() {
 }
 const ADB = resolveAdb();
 
+/** The wrapper differs by platform, and printing the wrong one sends people in circles. */
+const GRADLEW = process.platform === 'win32' ? '.\\gradlew.bat' : './gradlew';
+
 function adbOut(args) {
   try {
     return execFileSync(ADB, SERIAL ? ['-s', SERIAL, ...args] : args, {
@@ -119,7 +122,7 @@ if (!SKIP_DEVICE) {
     console.log(`  emulator        ${devices.map((d) => d.split(/\s+/)[0]).join(', ')}`);
     if (!adbOut(['shell', `pm list packages ${PACKAGE}`]).includes(PACKAGE)) {
       console.log(`  watch app       NOT INSTALLED`);
-      blockers.push(`${PACKAGE} is not installed. Run: cd wear && .\\gradlew.bat installDebug`);
+      blockers.push(`${PACKAGE} is not installed. Run: cd wear && ${GRADLEW} installDebug`);
     } else {
       const paired = !adbOut(['shell', `dumpsys package ${PACKAGE}`]).includes('NOT_INSTALLED');
       console.log(`  watch app       installed${paired ? '' : ' (state unclear)'}`);

@@ -101,6 +101,37 @@ function uiDump() {
   shell('uiautomator dump /sdcard/aibou-bg.xml >/dev/null 2>&1');
   return adb(['exec-out', 'cat', '/sdcard/aibou-bg.xml']);
 }
+
+/**
+ * Actual display size, because gestures have to land on the real screen.
+ *
+ * Coordinates were previously fixed at the 454px large-round geometry, so on a
+ * 384px AVD the swipe to open the notification stream started below the bottom
+ * edge and did nothing at all. The test then blamed the app for a notification
+ * it had never managed to open.
+ */
+function displaySize() {
+  const m = /(\d+)x(\d+)/.exec(shell('wm size'));
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: 384, h: 384 };
+}
+const SCREEN = displaySize();
+
+/**
+ * Wake the display and confirm it is on.
+ *
+ * The watch dozes off during the 95s background wait, and uiautomator returns an
+ * empty hierarchy against a dark screen — indistinguishable from a missing view.
+ */
+function wakeScreen() {
+  for (let i = 0; i < 3; i++) {
+    if (/mScreenOn=true|Display Power: state=ON|mWakefulness=Awake/.test(shell('dumpsys power'))) {
+      return true;
+    }
+    shell('input keyevent KEYCODE_WAKEUP');
+    execFileSync('sleep', ['1']);
+  }
+  return false;
+}
 const screenText = (xml) =>
   [...xml.matchAll(/text="([^"]*)"/g)].map((m) => decodeEntities(m[1])).filter((t) => t.trim());
 
@@ -298,7 +329,9 @@ check(
   clientsAfter >= clientsBefore,
   `Bridge clients ${clientsBefore} -> ${clientsAfter}`,
 );
-const frozen = /freezing .*${PACKAGE}/.test(shell('logcat -d -t 300'));
+// A regex literal does not interpolate, so this used to test for the literal
+// text "${PACKAGE}" and could never match.
+const frozen = new RegExp(`freezing .*${PACKAGE}`).test(shell('logcat -d -t 300'));
 if (frozen) console.log('  ..  note: the OS still reported freezing at some point');
 
 // ─── Stage 2: desk sends work ────────────────────────────────────────────────
@@ -354,16 +387,39 @@ check('notification offers inline actions', posted.hasActions, 'Approve / Deny o
 
 console.log('\n> Stage 4 -- open the notification and tap Approve');
 
-// Wear opens the notification stream on a swipe up from the bottom.
-shell('input swipe 227 430 227 90 300');
+// The watch has been dark for a minute and a half; a dump of an off screen is
+// empty, which would read as "the notification is not there".
+wakeScreen();
+await sleep(1200);
+
+// Wear opens the notification stream on a swipe up from the bottom edge, scaled
+// to this display rather than assumed.
+const midX = Math.round(SCREEN.w / 2);
+shell(`input swipe ${midX} ${SCREEN.h - 5} ${midX} ${Math.round(SCREEN.h * 0.2)} 300`);
 await sleep(2500);
 
 let target = findTapTarget(uiDump(), 'Approve');
+if (!target) {
+  // The first swipe is sometimes spent dismissing the ambient screen, so try the
+  // gesture once more before concluding the notification is unreachable.
+  shell(`input swipe ${midX} ${SCREEN.h - 5} ${midX} ${Math.round(SCREEN.h * 0.2)} 300`);
+  await sleep(2500);
+  target = findTapTarget(uiDump(), 'Approve');
+}
 if (!target) {
   // The stream may show a collapsed card; open it, then look again.
   const card = findTapTarget(uiDump(), 'Kiro') ?? findTapTarget(uiDump(), 'approval');
   if (card) {
     shell(`input tap ${card.x} ${card.y}`);
+    await sleep(2500);
+    target = findTapTarget(uiDump(), 'Approve');
+  }
+}
+if (!target) {
+  // Wear collapses a long card behind a "Show more"-style expander.
+  const expand = findTapTarget(uiDump(), 'Aibou');
+  if (expand) {
+    shell(`input tap ${expand.x} ${expand.y}`);
     await sleep(2500);
     target = findTapTarget(uiDump(), 'Approve');
   }
