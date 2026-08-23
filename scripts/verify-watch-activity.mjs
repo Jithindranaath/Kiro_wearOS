@@ -213,7 +213,8 @@ function waitFor(pred, timeout, what) {
 
 console.log('\n> Stage 0 -- device');
 if (!shell(`pm list packages ${PACKAGE}`).includes(PACKAGE)) {
-  fail(`${PACKAGE} not installed. Run: cd wear && .\\gradlew.bat installDebug`);
+  const gradlew = process.platform === 'win32' ? '.\\gradlew.bat' : './gradlew';
+  fail(`${PACKAGE} not installed. Run: cd wear && ${gradlew} installDebug`);
 }
 check('watch app installed', true, PACKAGE);
 

@@ -21,6 +21,7 @@
     "watch:live": "node scripts/watch-live.mjs",
     "verify:watch": "node scripts/verify-watch-live.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "pair:watch": "node scripts/pair-watch.mjs",
     "verify": "node scripts/verify-all.mjs",
     "verify:quick": "node scripts/verify-all.mjs --quick",
     "verify:node": "node scripts/verify-all.mjs --skip-device"

@@ -225,16 +225,35 @@ Current status:
 |---|---|
 | Build | 4/4 packages |
 | Typecheck | 4/4 packages |
-| Unit tests | 202/202 |
-| Module + integration | 67/67 |
+| Unit tests | 235/235 |
+| Module + integration | 68/68 |
 | PWA frame contract | 20/20 |
-| Runtime timing | 16/16 |
-| Wear OS build | debug + signed release, 0 warnings |
+| Wear OS build | debug + release |
 | Wear OS lint | 0 errors |
+| Wear OS on-device suites | 9/9 (see below) |
 
-The TypeScript side is verified against both the mock agent and real `kiro-cli`
-2.18.1. The Wear OS app compiles and lints clean but has **not** been exercised
-on a device — see Known Limitations.
+The TypeScript side is verified against both the mock agent and real `kiro-cli`.
+
+The Wear OS app is verified on a Wear OS 6 emulator (`Wear_OS_Small_Round`,
+API 36, 384×384) against the real agent. `node scripts/verify-all.mjs` drives the
+app over adb — real taps at real coordinates, never a simulated client — and all
+nine suites pass:
+
+| Suite | Checks |
+|---|---|
+| typecheck + lint + unit tests | 235 tests |
+| session close + capacity recovery | 8/8 |
+| Kiro account integration | 15/15 |
+| approval tap (allow) | 24/24 |
+| approval tap (deny) | 24/24 |
+| activity feed on the watch | 26/26 |
+| terminal session approved on the watch | 16/16 |
+| backgrounded approval + notification | 18/18 |
+| sessions released | 8/8 |
+
+That covers pairing through the keypad, the Keystore token round-trip across a
+cold boot, haptics, screen wake, auto-navigation to an approval, both decisions,
+the notification path with the app off screen, and reconnect.
 
 ## Building the Wear OS app
 
@@ -245,8 +264,23 @@ cd wear
 ./gradlew :app:lintDebug              # 0 errors expected
 ```
 
-Toolchain is pinned: Gradle 9.4.1, AGP 9.2.1, Kotlin 2.4.10, JDK 17,
+Toolchain is pinned: Gradle 9.4.1, AGP 9.2.1, Kotlin 2.4.10, JDK 17+,
 compileSdk 37, targetSdk 36, minSdk 30 (Wear OS 3+).
+
+First build on a fresh machine needs two SDK packages that Android Studio does
+not install by default, since `compileSdk 37` is newer than the bundled default:
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"   # macOS; ~/Android/Sdk on Linux
+sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+```
+
+If `sdkmanager` is missing, install the command-line tools from the SDK Manager in
+Android Studio (*SDK Tools → Android SDK Command-line Tools*), or unpack Google's
+`commandlinetools` archive into `$ANDROID_HOME/cmdline-tools/latest`.
+
+Gradle needs `ANDROID_HOME` set, or an `sdk.dir` line in `wear/local.properties`
+(gitignored — Android Studio writes it for you on first open).
 
 Install to a device or emulator:
 
@@ -257,6 +291,23 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 **Emulator note:** the Bridge on your host is reachable at `10.0.2.2:8787` from
 inside the emulator. That value is pre-filled on the pairing screen but is fully
 editable, so a physical watch can point at your machine's LAN IP instead.
+
+**Cold-boot the AVD.** A Wear AVD resumed from a quickboot snapshot restores the
+clock it was saved with, and the watch has no time source to correct it. Elapsed
+times are then computed against a host clock that disagrees by however long the
+snapshot sat unused. Launch with *Cold Boot Now* in Android Studio, or:
+
+```bash
+$ANDROID_HOME/emulator/emulator -avd Wear_OS_Small_Round -no-snapshot-load
+```
+
+Pair the app without tapping out the code by hand:
+
+```bash
+node scripts/pair-watch.mjs <6-digit-code> --serial emulator-5554
+```
+
+It drives the real keypad over adb, so the Keystore path is still exercised.
 
 Release signing is optional and driven by `wear/keystore.properties` (gitignored,
 see `keystore.properties.example`). Without it the release build still succeeds
@@ -288,11 +339,13 @@ rather than starting in a broken state.
 
 ## Known Limitations
 
-- **Wear OS app is not runtime-verified.** It compiles clean and passes lint with
-  zero errors, and its networking mirrors the PWA client that *is* verified
-  end-to-end. But haptics, screen wake, the pairing keypad, auto-reconnect and
-  the Keystore round-trip have not been exercised on a physical watch or
-  emulator. Treat the watch as the least-proven surface.
+- **Wear OS app is verified on an emulator, not on physical hardware.** Every
+  device suite above runs against a Wear OS 6 AVD. Real haptics, a real ambient
+  display and real Wi-Fi roaming behave differently from an emulator, so a
+  physical watch remains untested.
+- **Only one watch geometry is tested.** The suites run on a 384×384 small round
+  AVD. Other sizes should work — the layout no longer assumes a fixed screen —
+  but they are not covered.
 - **No TLS.** Binds to `127.0.0.1` by default; LAN binding requires an explicit
   `--host` flag and prints a warning. Use Tailscale or a VPN for remote access.
 - **No background push.** PWA notifications require the tab to be open, and the

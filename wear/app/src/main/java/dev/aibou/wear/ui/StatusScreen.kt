@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material.*
 import dev.aibou.wear.data.ConnectionState
 import dev.aibou.wear.data.SessionState
@@ -44,10 +45,29 @@ fun StatusScreen(
         }
     }
 
+    // Lay the list out from the top instead of auto-centring it.
+    //
+    // ScalingLazyColumn centres item index 1 by default, which was tuned against
+    // a 454px screen with no session on it. On a 384px round watch the taller
+    // session block pushed the connection header clean off the top, so the app
+    // opened without saying whether it was connected at all. Auto-centring item 0
+    // instead only moved the problem: half the viewport became empty padding and
+    // the activity preview fell off the bottom.
+    //
+    // With autoCentering disabled the header starts at the top edge and every
+    // later item flows into the space below it, which is what a status screen
+    // wants — nothing here needs to sit under a rotary detent.
+    val listState = rememberScalingLazyListState(
+        initialCenterItemIndex = 0,
+        initialCenterItemScrollOffset = 0,
+    )
+
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
+        state = listState,
+        autoCentering = null,
         horizontalAlignment = Alignment.CenterHorizontally,
-        contentPadding = PaddingValues(16.dp)
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
     ) {
         // Mock mode badge
         if (uiState.mode == "mock") {
@@ -263,8 +283,23 @@ fun StatusScreen(
     }
 }
 
+/**
+ * Elapsed time since the Bridge last saw activity, or `--:--` when it cannot be
+ * known.
+ *
+ * `lastActivity` is stamped on the Bridge's clock but subtracted from the
+ * watch's, so the two must agree for the result to mean anything. They often do
+ * not: a Wear emulator boots with a stale clock and no time source, and a real
+ * watch that has been off the network drifts. The difference then comes out
+ * negative, which used to render as "-253762m -18s".
+ *
+ * A wrong number is worse than no number, so skew is reported as unknown rather
+ * than displayed. Sub-second jitter is treated as zero, since that is ordinary
+ * round-trip noise rather than a broken clock.
+ */
 private fun formatElapsed(ms: Long): String {
-    val totalSeconds = ms / 1000
+    if (ms < -1000) return "--:--"
+    val totalSeconds = (if (ms < 0) 0 else ms) / 1000
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return if (minutes > 59) {

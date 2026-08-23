@@ -198,7 +198,10 @@ if (devices.length === 0) {
 
   const installed = shell(`pm list packages ${PACKAGE}`).includes(PACKAGE);
   line('watch app', installed ? ok('installed') : bad('not installed'));
-  if (!installed) advice.push('Install it:  cd wear && .\\gradlew.bat installDebug');
+  if (!installed) {
+    const gradlew = process.platform === 'win32' ? '.\\gradlew.bat' : './gradlew';
+    advice.push(`Install it:  cd wear && ${gradlew} installDebug`);
+  }
 
   if (installed) {
     const running = shell(`ps -A | grep ${PACKAGE}`).includes(PACKAGE);

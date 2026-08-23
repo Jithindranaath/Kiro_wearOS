@@ -379,9 +379,18 @@ check(
 const density = readDensity();
 const px2dp = (px) => Math.round(px / (density / 160));
 
+// Scaled to the real display: these were the 454px large-round coordinates, and
+// a 384px AVD needs a shorter gesture nearer the centre.
+const screen = (() => {
+  const m = /(\d+)x(\d+)/.exec(shell('wm size'));
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: 384, h: 384 };
+})();
+
 const seen = { Approve: approveBtn, Deny: findTapTarget(approvalXml, 'Deny') };
 for (let i = 0; i < 3; i++) {
-  shell('input swipe 227 340 227 200 300'); // nudge the list up
+  // Nudge the list up.
+  const x = Math.round(screen.w / 2);
+  shell(`input swipe ${x} ${Math.round(screen.h * 0.75)} ${x} ${Math.round(screen.h * 0.45)} 300`);
   await new Promise((r) => setTimeout(r, 600));
   const xml = uiDump();
   for (const label of ['Approve', 'Deny']) {

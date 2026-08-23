@@ -117,9 +117,14 @@ fun AibouApp(
     // still "approval", the effect declined to navigate, and by the time the pop
     // finished the id had not changed so nothing fired again. The developer saw
     // nothing at all while the agent sat blocked.
-    val currentRoute by navController.currentBackStackEntryFlow
-        .map { it.destination.route }
-        .collectAsState(initial = null)
+    //
+    // Remembered against the controller: building the operator chain inside
+    // composition would hand collectAsState a new Flow on every recomposition,
+    // resetting the collected route back to null and re-firing the effect below.
+    val routeFlow = remember(navController) {
+        navController.currentBackStackEntryFlow.map { it.destination.route }
+    }
+    val currentRoute by routeFlow.collectAsState(initial = null)
 
     LaunchedEffect(pendingApprovalId, currentRoute) {
         if (pendingApprovalId != null &&
