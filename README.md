@@ -450,11 +450,12 @@ would have permanently hidden voice input on Android 11+. All are written up in
 
 ## Team
 
-Solo submission.
+Two members.
 
-| Member | Contribution |
-|---|---|
-| _(repository owner)_ | Concept, product decisions, specs and steering, review and testing of all generated code, ACP protocol verification against the live agent, and submission |
+| Member | Role | Contribution |
+|---|---|---|
+| **Jithindranaath** | Bridge & protocol | Concept and product decisions, specs and steering. Defined the AWP frame contract in `packages/protocol` as the single source of truth, then built the Bridge on it: the ACP client that spawns and drives real `kiro-cli`, ACP→AWP normalisation, the per-session ring buffer with replay-since, and the approval manager that holds a permission request open until a human answers. Also the fail-closed policy engine, constant-time token auth with per-IP rate limiting, and the unit suite. |
+| **Sri Dakshith Nimmagadda** | Clients & device verification | The Wear OS app in Kotlin and Compose — two-step pairing keypad, status screen, risk-tiered haptics, and token storage encrypted with an AES-256-GCM key held in the Android Keystore. The React PWA, including approval cards, the live event stream and the unsuppressible mock-mode banner. Drove on-device verification, including the adb-driven suites that assert an approval genuinely renders on the watch and that a real tap decides it. |
 
 ---
 

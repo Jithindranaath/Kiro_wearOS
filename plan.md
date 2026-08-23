@@ -30,15 +30,16 @@
 
 ---
 
-## 3. Suggested split for a team of three
+## 3. Split for a team of two
 
 | Role | Owns |
 |---|---|
-| **A — Bridge** | Epics 1, 2, 3. The critical path. Most experienced dev goes here. |
-| **B — Clients** | Epics 4, 5. Blocked until Phase 2 lands the protocol; works against the mock agent from Phase 1. |
-| **C — Quality & docs** | Epic 6, mock agent, CI, README, video, clean-machine testing. Starts day 1, not day 7. |
+| **A — Bridge & protocol** (Jithindranaath) | Epics 1, 2, 3, plus the mock agent so B is never blocked on a real agent. The critical path. |
+| **B — Clients & verification** (Sri Dakshith Nimmagadda) | Epics 4, 5. Works against the mock agent from Phase 1, so it does not wait for Phase 2 to land the protocol. Owns on-device testing. |
 
-Solo? Cut R5.2 (voice) and R2.3 (audit API) immediately and follow the same order.
+Epic 6 (quality and docs) is shared and starts day 1, not day 7 — with two people there is no third person to absorb it late.
+
+With only two, cut R5.2 (voice) and R2.3 (audit API) early if the schedule tightens, and follow the same order.
 
 ---
 
