@@ -710,7 +710,22 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   } catch (err) {
     const msg = String(err);
     if (msg.includes('EADDRINUSE')) {
-      console.error(`❌ Port ${port} is already in use.`);
+      // Almost always another Bridge (often `pnpm run demo` in a second
+      // terminal), so name that case and offer both ways out. The agent has
+      // already spawned by this point; kill it so we do not leak the process.
+      acpClient.kill();
+      console.error(
+        `\n❌ Port ${port} is already in use — most likely another Bridge is running.\n\n` +
+          `   Who has it:\n` +
+          (process.platform === 'win32'
+            ? `     Get-NetTCPConnection -LocalPort ${port} -State Listen | ` +
+              `ForEach-Object { Get-Process -Id $_.OwningProcess }\n`
+            : `     lsof -nP -iTCP:${port} -sTCP:LISTEN\n`) +
+          `\n   Then either stop it, or run this one beside it:\n` +
+          `     aibou --port ${port + 1}\n\n` +
+          `   Note that a paired watch or phone points at one port, so if you\n` +
+          `   change it you will need to re-pair that device.\n`,
+      );
       process.exit(ExitCode.PORT_IN_USE);
     }
     throw err;

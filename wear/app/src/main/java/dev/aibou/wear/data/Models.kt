@@ -57,6 +57,32 @@ data class PermissionResolved(
 )
 
 /**
+ * One line of agent activity, rendered on the watch so the developer can see
+ * what Kiro is actually doing between approvals.
+ *
+ * `text` is only ever what the Bridge sent. Nothing here is synthesised — an
+ * event the agent did not report simply does not appear (context.md §6).
+ */
+data class ActivityItem(
+    val seq: Long,
+    val kind: String,
+    val text: String,
+    val ts: Long = System.currentTimeMillis()
+) {
+    /** Short glyph so a glance conveys the type without reading. */
+    val glyph: String
+        get() = when (kind) {
+            "agent.text" -> "💬"
+            "agent.thought" -> "…"
+            "tool.start" -> "⚙"
+            "tool.end" -> "✓"
+            "task.update" -> "📋"
+            "usage" -> "📊"
+            else -> "•"
+        }
+}
+
+/**
  * Combined UI state derived from WebSocket frames.
  */
 data class UiState(
@@ -64,8 +90,21 @@ data class UiState(
     val mode: String? = null, // "live" | "mock"
     val session: SessionState? = null,
     val pendingApproval: PermissionRequest? = null,
+    /** Newest last. Bounded — see AibouClient.MAX_ACTIVITY. */
+    val activity: List<ActivityItem> = emptyList(),
     val error: String? = null
-)
+) {
+    /**
+     * Line to preview on the status screen.
+     *
+     * Prefers the newest thing the agent said or did over bookkeeping: a token
+     * count is the least useful answer to "what is it doing right now", and it
+     * often arrives last, so a naive tail would show that instead of the work.
+     * The full feed still keeps everything in arrival order.
+     */
+    val latestActivity: ActivityItem?
+        get() = activity.lastOrNull { it.kind != "usage" } ?: activity.lastOrNull()
+}
 
 enum class ConnectionState {
     DISCONNECTED,

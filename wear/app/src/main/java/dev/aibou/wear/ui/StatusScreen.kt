@@ -21,7 +21,8 @@ import kotlinx.coroutines.delay
 @Composable
 fun StatusScreen(
     uiState: UiState,
-    onNavigateToApproval: () -> Unit
+    onNavigateToApproval: () -> Unit,
+    onNavigateToActivity: () -> Unit = {}
 ) {
     val session = uiState.session
     val connectionState = uiState.connectionState
@@ -38,13 +39,6 @@ fun StatusScreen(
                 elapsedText = "--:--"
             }
             delay(1000)
-        }
-    }
-
-    // Navigate to approval when one arrives
-    LaunchedEffect(uiState.pendingApproval) {
-        if (uiState.pendingApproval != null) {
-            onNavigateToApproval()
         }
     }
 
@@ -160,6 +154,43 @@ fun StatusScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+
+            // What the agent is doing right now — the newest line only, so the
+            // status screen stays glanceable. Tap through for the full feed.
+            val latest = uiState.latestActivity
+            if (latest != null) {
+                item {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Chip(
+                        onClick = onNavigateToActivity,
+                        label = {
+                            Text(
+                                text = "${latest.glyph} ${latest.text.replace('\n', ' ').trim()}",
+                                style = MaterialTheme.typography.caption2,
+                                maxLines = 2
+                            )
+                        },
+                        secondaryLabel = {
+                            Text(
+                                text = "activity",
+                                style = MaterialTheme.typography.caption3,
+                                color = MaterialTheme.colors.onSurface.copy(alpha = 0.5f)
+                            )
+                        },
+                        colors = ChipDefaults.secondaryChipColors(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            } else {
+                item {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    CompactChip(
+                        onClick = onNavigateToActivity,
+                        label = { Text("Activity", style = MaterialTheme.typography.caption2) },
+                        colors = ChipDefaults.secondaryChipColors()
+                    )
+                }
             }
 
             // Pending approvals badge

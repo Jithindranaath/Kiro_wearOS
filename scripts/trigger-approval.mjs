@@ -11,35 +11,55 @@
  *   node scripts/trigger-approval.mjs <pairing-code> [prompt]
  */
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import WebSocket from 'ws';
 
 const BASE = 'http://127.0.0.1:8787';
 const WS_URL = 'ws://127.0.0.1:8787/ws';
-const CODE = process.argv[2];
-const PROMPT = process.argv[3] ?? 'run the tests';
+const args = process.argv.slice(2);
+// The code is optional: a bare prompt is fine when a stored token exists.
+const CODE = /^\d{6}$/.test(args[0] ?? '') ? args.shift() : null;
+const PROMPT = args[0] ?? 'run the tests';
 
-if (!CODE) {
-  console.error('Usage: node scripts/trigger-approval.mjs <pairing-code> [prompt]');
-  process.exit(1);
-}
+// ─── Authenticate ────────────────────────────────────────────────────────────
 
-// ─── Pair ────────────────────────────────────────────────────────────────────
+/**
+ * Get a bearer token.
+ *
+ * Pairing codes live for ten minutes, which is shorter than a working session,
+ * so fall back to a token this machine was already issued rather than forcing a
+ * Bridge restart just to run a script. Tokens are never printed.
+ */
+async function getToken() {
+  if (CODE) {
+    const res = await fetch(`${BASE}/api/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: CODE }),
+    });
+    if (res.ok) return (await res.json()).token;
+    console.log(`code rejected (HTTP ${res.status}); falling back to a stored token`);
+  }
 
-const pairRes = await fetch(`${BASE}/api/pair`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ code: CODE }),
-});
+  try {
+    const cfg = JSON.parse(readFileSync(join(homedir(), '.aibou', 'config.json'), 'utf-8'));
+    const stored = Array.isArray(cfg.tokens) ? cfg.tokens.at(-1) : null;
+    if (typeof stored === 'string' && stored.length > 0) return stored;
+  } catch {
+    /* nothing stored yet */
+  }
 
-if (!pairRes.ok) {
   console.error(
-    pairRes.status === 401
-      ? '\n❌ Invalid or expired pairing code.\n   Restart the Bridge and use the new code.\n'
-      : `\n❌ Pairing failed: HTTP ${pairRes.status}\n`,
+    '\n❌ Could not authenticate.\n' +
+      '   Pass a fresh pairing code from the Bridge banner:\n' +
+      '     node scripts/trigger-approval.mjs <code> "<prompt>"\n',
   );
   process.exit(1);
 }
-const { token } = await pairRes.json();
+
+const token = await getToken();
 
 // ─── Connect ─────────────────────────────────────────────────────────────────
 

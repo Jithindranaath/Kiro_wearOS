@@ -1,16 +1,21 @@
 package dev.aibou.wear
 
+import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
-import androidx.lifecycle.lifecycleScope
+import androidx.compose.ui.platform.LocalContext
 import androidx.wear.compose.navigation.SwipeDismissableNavHost
 import androidx.wear.compose.navigation.composable
 import androidx.wear.compose.navigation.rememberSwipeDismissableNavController
 import dev.aibou.wear.data.AibouClient
+import dev.aibou.wear.data.AibouRuntime
+import dev.aibou.wear.data.BridgeConnectionService
 import dev.aibou.wear.data.TokenStore
 import dev.aibou.wear.ui.*
 import dev.aibou.wear.ui.theme.AibouWearTheme
@@ -33,16 +38,35 @@ class MainActivity : ComponentActivity() {
     private lateinit var tokenStore: TokenStore
     private lateinit var client: AibouClient
 
+    /**
+     * Approvals are delivered as notifications when the app is not on screen, so
+     * without this permission the developer can miss them entirely. Asked for on
+     * launch rather than at the moment an approval lands, because a permission
+     * dialog is the last thing that should stand between a blocked agent and an
+     * answer.
+     */
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* either way, carry on */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        tokenStore = TokenStore(applicationContext)
-        client = AibouClient(tokenStore, lifecycleScope)
+        // Shared, process-scoped: the connection must survive this Activity so an
+        // approval raised while the app is backgrounded still arrives.
+        tokenStore = AibouRuntime.tokenStore(applicationContext)
+        client = AibouRuntime.client(applicationContext)
 
-        // Auto-connect if already paired (AC5.1.7)
-        if (tokenStore.isPaired) {
-            client.connect()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+
+        // Auto-connect if already paired (AC5.1.7), and keep that connection alive
+        // once the developer leaves the app.
+        AibouRuntime.ensureConnected(applicationContext)
+        BridgeConnectionService.start(applicationContext)
 
         setContent {
             AibouWearTheme {
@@ -55,10 +79,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        client.disconnect()
-    }
+    // Deliberately no disconnect in onDestroy. Closing the socket when the
+    // Activity goes away is what made the watch deaf to approvals the moment the
+    // developer left the app. The connection belongs to AibouRuntime now.
 
     private fun hasSpeechRecognition(): Boolean {
         val intent = android.content.Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
@@ -74,9 +97,26 @@ fun AibouApp(
 ) {
     val navController = rememberSwipeDismissableNavController()
     val uiState by client.state.collectAsState()
+    val context = LocalContext.current
 
     // Determine start destination
     val startDestination = if (tokenStore.isPaired) "status" else "pair"
+
+    // Raise an approval from wherever the developer happens to be.
+    //
+    // This deliberately lives above the NavHost rather than inside a screen: a
+    // destination's effects stop running once it leaves composition, so an
+    // approval arriving while the activity feed was open used to go unnoticed.
+    // An approval is the one thing that must always interrupt.
+    val pendingApprovalId = uiState.pendingApproval?.approvalId
+    LaunchedEffect(pendingApprovalId) {
+        if (pendingApprovalId != null &&
+            navController.currentDestination?.route != "approval" &&
+            navController.currentDestination?.route != "pair"
+        ) {
+            navController.navigate("approval")
+        }
+    }
 
     SwipeDismissableNavHost(
         navController = navController,
@@ -91,6 +131,8 @@ fun AibouApp(
                 defaultPort = DEFAULT_BRIDGE_PORT,
                 onPaired = {
                     client.connect()
+                    // Only now is there a token to keep a connection with.
+                    BridgeConnectionService.start(context)
                     navController.navigate("status") {
                         popUpTo("pair") { inclusive = true }
                     }
@@ -103,8 +145,15 @@ fun AibouApp(
                 uiState = uiState,
                 onNavigateToApproval = {
                     navController.navigate("approval")
+                },
+                onNavigateToActivity = {
+                    navController.navigate("activity")
                 }
             )
+        }
+
+        composable("activity") {
+            ActivityScreen(uiState = uiState)
         }
 
         composable("approval") {

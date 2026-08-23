@@ -21,7 +21,8 @@ import java.util.concurrent.TimeUnit
  */
 class AibouClient(
     private val tokenStore: TokenStore,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val notifier: ApprovalNotifier? = null
 ) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -31,6 +32,9 @@ class AibouClient(
     private var reconnectJob: Job? = null
     private var intentionalClose = false
     private var lastSeq = 0L
+
+    /** Decisions taken while the socket was down, flushed on reconnect. */
+    private val pendingSends = mutableListOf<String>()
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -42,6 +46,12 @@ class AibouClient(
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        /** Activity lines retained. Small on purpose: a watch, not a terminal. */
+        const val MAX_ACTIVITY = 40
+
+        /** Cap per line so one long tool result cannot dominate memory. */
+        const val MAX_ITEM_CHARS = 400
     }
 
     /**
@@ -71,6 +81,11 @@ class AibouClient(
 
     /**
      * Send a permission response (approve or deny).
+     *
+     * A decision tapped on a notification can arrive before the socket is ready,
+     * because the process may have just been recreated. Dropping it there would
+     * lose the developer's answer silently and leave the agent blocked, so an
+     * unsendable decision is queued and flushed once authentication completes.
      */
     fun respondToPermission(approvalId: String, decision: String) {
         val frame = buildJsonObject {
@@ -80,7 +95,31 @@ class AibouClient(
             put("decision", decision)
             put("ts", System.currentTimeMillis())
         }
-        webSocket?.send(frame.toString())
+        if (!trySend(frame.toString())) {
+            synchronized(pendingSends) { pendingSends.add(frame.toString()) }
+            connect() // no-op if a connection attempt is already in flight
+        }
+    }
+
+    /** Send now if the socket is open, reporting whether it went out. */
+    private fun trySend(payload: String): Boolean {
+        val ws = webSocket ?: return false
+        return runCatching { ws.send(payload) }.getOrDefault(false)
+    }
+
+    /** Flush anything queued while the socket was down. */
+    private fun flushPending() {
+        val queued: List<String>
+        synchronized(pendingSends) {
+            if (pendingSends.isEmpty()) return
+            queued = pendingSends.toList()
+            pendingSends.clear()
+        }
+        for (payload in queued) {
+            if (!trySend(payload)) {
+                synchronized(pendingSends) { pendingSends.add(payload) }
+            }
+        }
     }
 
     /**
@@ -222,6 +261,8 @@ class AibouClient(
                         put("ts", System.currentTimeMillis())
                     }
                     webSocket?.send(subscribeFrame.toString())
+                    // Deliver any decision taken while offline.
+                    flushPending()
                 }
 
                 "session.state" -> {
@@ -248,6 +289,9 @@ class AibouClient(
                         expiresAt = frame["expiresAt"]?.jsonPrimitive?.long ?: 0
                     )
                     _state.value = _state.value.copy(pendingApproval = approval)
+                    // Also raise it outside the app, so a backgrounded watch or a
+                    // dark screen does not leave the agent blocked in silence.
+                    notifier?.show(approval)
                 }
 
                 "permission.resolved" -> {
@@ -255,11 +299,15 @@ class AibouClient(
                     if (resolvedId == _state.value.pendingApproval?.approvalId) {
                         _state.value = _state.value.copy(pendingApproval = null)
                     }
+                    // Resolved by anyone — this watch, the PWA, policy, or a
+                    // timeout. Either way the notification is now stale.
+                    notifier?.clear()
                 }
 
                 "event" -> {
                     val seq = frame["seq"]?.jsonPrimitive?.long ?: 0
                     if (seq > lastSeq) lastSeq = seq
+                    appendActivity(seq, frame)
                 }
 
                 "heartbeat" -> {
@@ -287,6 +335,99 @@ class AibouClient(
         } catch (e: Exception) {
             // Ignore malformed frames
         }
+    }
+
+    /**
+     * Turn an AWP `event` frame into a line of watch-readable activity.
+     *
+     * The agent streams its prose in many small chunks, so consecutive
+     * `agent.text` events are merged into the item already on screen rather than
+     * producing a wall of fragments. Events that carry no displayable text are
+     * dropped instead of being padded out with invented wording.
+     */
+    private fun appendActivity(seq: Long, frame: JsonObject) {
+        val kind = frame["kind"]?.jsonPrimitive?.content ?: return
+        val payload = frame["payload"] as? JsonObject
+
+        val text = describe(kind, payload) ?: return
+
+        val current = _state.value.activity
+        val last = current.lastOrNull()
+
+        // Merge streamed prose into the previous line so it reads as a sentence.
+        val merged =
+            if (last != null && last.kind == kind && (kind == "agent.text" || kind == "agent.thought")) {
+                current.dropLast(1) + last.copy(seq = seq, text = (last.text + text).takeLast(MAX_ITEM_CHARS))
+            } else {
+                current + ActivityItem(seq = seq, kind = kind, text = text.take(MAX_ITEM_CHARS))
+            }
+
+        _state.value = _state.value.copy(activity = merged.takeLast(MAX_ACTIVITY))
+    }
+
+    /**
+     * Human-readable one-liner for an event payload, or null when the event has
+     * nothing worth showing on a watch-sized screen.
+     */
+    private fun describe(kind: String, payload: JsonObject?): String? {
+        if (payload == null) return null
+
+        fun str(key: String): String? =
+            (payload[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+        return when (kind) {
+            "agent.text", "agent.thought" -> str("text")
+
+            "tool.start" -> {
+                val command = (payload["rawInput"] as? JsonObject)
+                    ?.let { (it["command"] as? JsonPrimitive)?.contentOrNull }
+                command ?: str("title") ?: str("kind")
+            }
+
+            "tool.end" -> {
+                val status = str("status") ?: "done"
+                val output = toolOutput(payload)
+                if (output != null) "$status — $output" else status
+            }
+
+            "task.update" -> {
+                val entries = payload["entries"] as? JsonArray ?: return "plan updated"
+                val active = entries.firstOrNull { entry ->
+                    val status = ((entry as? JsonObject)?.get("status") as? JsonPrimitive)?.contentOrNull
+                    status == "in_progress"
+                } as? JsonObject
+                val label = (active?.get("content") as? JsonPrimitive)?.contentOrNull
+                label ?: "plan: ${entries.size} steps"
+            }
+
+            // Only ever the agent's own numbers, never a computed estimate.
+            "usage" -> {
+                val used = (payload["used"] as? JsonPrimitive)?.contentOrNull
+                val size = (payload["size"] as? JsonPrimitive)?.contentOrNull
+                when {
+                    used != null && size != null -> "context $used/$size"
+                    used != null -> "context $used"
+                    else -> null
+                }
+            }
+
+            else -> null
+        }
+    }
+
+    /** Pull the first text blob out of an ACP tool result, if there is one. */
+    private fun toolOutput(payload: JsonObject): String? {
+        val content = payload["content"] as? JsonArray ?: return null
+        for (element in content) {
+            val obj = element as? JsonObject ?: continue
+            // Real kiro-cli nests as { type: "content", content: { text } };
+            // some agents send { text } directly.
+            val direct = (obj["text"] as? JsonPrimitive)?.contentOrNull
+            if (!direct.isNullOrBlank()) return direct.trim()
+            val nested = ((obj["content"] as? JsonObject)?.get("text") as? JsonPrimitive)?.contentOrNull
+            if (!nested.isNullOrBlank()) return nested.trim()
+        }
+        return null
     }
 
     /**

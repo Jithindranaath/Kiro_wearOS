@@ -7,6 +7,26 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!--
+        Approvals are delivered as notifications when the app is not on screen.
+        Without this the watch stays silent while the agent sits blocked.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        A backgrounded process gets frozen by ActivityManager, which kills the
+        WebSocket and loses approvals. A foreground service is the only reliable
+        way to hold the connection open on Wear.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+        specialUse, not connectedDevice: that type additionally demands one of the
+        Bluetooth or WiFi-control permissions, none of which this app uses.
+        Declaring an unused permission to satisfy a type check would be dishonest,
+        and dataSync is throttled to a few hours a day.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <uses-feature android:name="android.hardware.type.watch" />
 
     <!--
@@ -50,5 +70,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Approve / Deny tapped straight on the notification. Not exported:
+            only this app may dispatch a decision.
+        -->
+        <receiver
+            android:name=".data.ApprovalActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.aibou.wear.RESPOND" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Holds the Bridge socket open while the app is off screen. -->
+        <service
+            android:name=".data.BridgeConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains the WebSocket to the developer's own paired machine so approval requests reach the watch while the app is off screen. A dropped connection means the agent stays blocked indefinitely." />
+        </service>
     </application>
 </manifest>

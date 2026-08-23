@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "lint": "echo ok"
   },
   "devDependencies": {

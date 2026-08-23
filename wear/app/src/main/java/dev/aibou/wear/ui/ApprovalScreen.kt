@@ -68,72 +68,69 @@ fun ApprovalScreen(
         else -> Color(0xFF10B981)
     }
 
-    ScalingLazyColumn(
-        modifier = Modifier.fillMaxSize(),
+    // A fixed Column, deliberately not a ScalingLazyColumn. On a 454x454 round
+    // watch the scaling list pushed Deny below the fold and shrank whatever sat
+    // near the edge, so the only glanceable action was Approve. Both choices
+    // must be equally reachable without scrolling: the safe answer should never
+    // be the harder one to reach.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 24.dp)
+        verticalArrangement = Arrangement.Center
     ) {
         // Risk indicator
-        item {
-            Text(
-                text = when (approval.riskTier) {
-                    "high" -> "⚠️ HIGH RISK"
-                    "medium" -> "⚡ APPROVAL"
-                    else -> "ℹ️ APPROVAL"
-                },
-                style = MaterialTheme.typography.caption1,
-                color = riskColor,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+        Text(
+            text = when (approval.riskTier) {
+                "high" -> "⚠️ HIGH RISK"
+                "medium" -> "⚡ APPROVAL"
+                else -> "ℹ️ APPROVAL"
+            },
+            style = MaterialTheme.typography.caption2,
+            color = riskColor,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
 
-        item { Spacer(modifier = Modifier.height(8.dp)) }
+        Spacer(modifier = Modifier.height(4.dp))
 
         // Summary — the key glanceable info (≤80 chars, ≥16sp, AC5.1.4)
-        item {
-            Text(
-                text = approval.summary,
-                style = MaterialTheme.typography.body1.copy(fontSize = 16.sp),
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp),
-                maxLines = 3
-            )
-        }
+        Text(
+            text = approval.summary,
+            style = MaterialTheme.typography.body2.copy(fontSize = 16.sp),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+            maxLines = 3
+        )
 
-        item { Spacer(modifier = Modifier.height(16.dp)) }
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Approve button — full width, ≥48dp tall (AC5.1.4)
-        item {
-            Chip(
-                onClick = {
-                    client.respondToPermission(approval.approvalId, "allow")
-                },
-                label = { Text("✓ Approve", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                colors = ChipDefaults.chipColors(backgroundColor = Color(0xFF059669)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            )
-        }
+        // Approve — full width, ≥48dp tall (AC5.1.4)
+        Chip(
+            onClick = { client.respondToPermission(approval.approvalId, "allow") },
+            label = {
+                Text("✓ Approve", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            },
+            colors = ChipDefaults.chipColors(backgroundColor = Color(0xFF059669)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+        )
 
-        item { Spacer(modifier = Modifier.height(8.dp)) }
+        Spacer(modifier = Modifier.height(6.dp))
 
-        // Deny button — full width, ≥48dp tall (AC5.1.4)
-        item {
-            Chip(
-                onClick = {
-                    client.respondToPermission(approval.approvalId, "deny")
-                },
-                label = { Text("✗ Deny", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                colors = ChipDefaults.chipColors(backgroundColor = Color(0xFFDC2626)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            )
-        }
+        // Deny — same size and prominence as Approve (AC5.1.4)
+        Chip(
+            onClick = { client.respondToPermission(approval.approvalId, "deny") },
+            label = {
+                Text("✗ Deny", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            },
+            colors = ChipDefaults.chipColors(backgroundColor = Color(0xFFDC2626)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+        )
     }
 }
 
