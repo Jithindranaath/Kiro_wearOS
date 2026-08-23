@@ -313,6 +313,48 @@ Release signing is optional and driven by `wear/keystore.properties` (gitignored
 see `keystore.properties.example`). Without it the release build still succeeds
 and produces an unsigned APK, so cloning the repo never requires local secrets.
 
+### Publishing an installable APK
+
+`assembleRelease` without `keystore.properties` emits `app-release-unsigned.apk`.
+**Android will not install an unsigned APK**, so that file is not shippable. To
+produce one that is:
+
+```bash
+cd wear
+keytool -genkeypair -v -keystore aibou-release.jks -alias aibou \
+        -keyalg RSA -keysize 4096 -validity 10000
+cp keystore.properties.example keystore.properties   # fill in your password
+cd .. && make wear-release
+```
+
+`scripts/wear-release.sh` runs lint, assembles the release, and verifies the
+signature with `apksigner` before printing the path. Keep the keystore — signing
+a later version with a different key forces users to uninstall before upgrading.
+
+CI does the same thing on a tag. `.github/workflows/release-wear.yml` builds,
+signs and attaches the APK to a GitHub Release when you push a `wear-v*` tag:
+
+```bash
+git tag wear-v1.0.0 && git push origin wear-v1.0.0
+```
+
+It needs four repository secrets (*Settings → Secrets and variables → Actions*):
+
+| Secret | Value |
+|---|---|
+| `WEAR_KEYSTORE_BASE64` | `base64 -i wear/aibou-release.jks` |
+| `WEAR_STORE_PASSWORD` | keystore password |
+| `WEAR_KEY_ALIAS` | `aibou` |
+| `WEAR_KEY_PASSWORD` | key password |
+
+Without the secrets the workflow still builds and uploads the unsigned APK as a
+run artifact, but it does not create a Release — publishing something that cannot
+be installed would be misleading.
+
+Bump `versionCode` in `wear/app/build.gradle.kts` for every published build;
+Android refuses to install an APK whose `versionCode` is lower than the one
+already on the watch.
+
 The token is encrypted with an AES-256-GCM key in the Android Keystore.
 `androidx.security:security-crypto` is deliberately unused — it is deprecated.
 

@@ -1,4 +1,4 @@
-.PHONY: setup dev demo test check build wear clean verify verify-quick verify-node
+.PHONY: setup dev demo test check build wear wear-release clean verify verify-quick verify-node
 
 setup:
 	pnpm install
@@ -31,6 +31,10 @@ verify-node:
 
 build:
 	pnpm -r build
+
+# Signed, installable Wear OS APK. Needs wear/keystore.properties.
+wear-release:
+	scripts/wear-release.sh
 
 clean:
 	pnpm -r exec -- rm -rf dist
